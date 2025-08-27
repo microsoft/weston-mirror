@@ -107,6 +107,7 @@ struct rdp_backend {
 	int no_clients_resize;
 	int force_no_compression;
 	bool redirect_clipboard;
+	bool enable_persistent_seat;
 	rdp_audio_in_setup audio_in_setup;
 	rdp_audio_in_teardown audio_in_teardown;
 	rdp_audio_out_setup audio_out_setup;
@@ -119,6 +120,7 @@ struct rdp_backend {
 	bool enable_distro_name_title;
 
 	freerdp_peer *rdp_peer; // this points a single instance of RAIL RDP peer.
+	struct weston_seat *persistent_seat; // Saved for persistent seat
 	pid_t compositor_tid;
 
 	struct weston_binding *debug_binding_M;
