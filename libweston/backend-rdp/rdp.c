@@ -760,12 +760,14 @@ static void
 rdp_peer_context_free(freerdp_peer* client, RdpPeerContext* context)
 {
 	struct rdp_backend *b;
+	rdpSettings *settings;
 	unsigned i;
 
 	if (!context)
 		return;
 
 	b = context->rdpBackend;
+	settings = client->context->settings;
 
 	/* While RDP client is disconnected, keep compositor sleep state */
 	weston_compositor_sleep(b->compositor);
@@ -801,8 +803,10 @@ rdp_peer_context_free(freerdp_peer* client, RdpPeerContext* context)
 	if (context->item.flags & RDP_PEER_ACTIVATED) {
 		weston_seat_release_keyboard(context->item.seat);
 		weston_seat_release_pointer(context->item.seat);
-		if (b->enable_persistent_seat && !b->persistent_seat) {
-			/* save current seat for future use only when it's not saved yet */
+		/* save current seat for future use only when it's not saved yet */
+		if (settings->RemoteApplicationMode &&
+			b->enable_persistent_seat &&
+		       	!b->persistent_seat) {
 			b->persistent_seat = context->item.seat;
 		} else {
 			weston_seat_release(context->item.seat);
@@ -1194,6 +1198,8 @@ xf_peer_activate(freerdp_peer* client)
 						   &xkbRuleNames, 0);
 	}
 
+	if (settings->RemoteApplicationMode)
+		snprintf(seat_name, sizeof(seat_name), "RDP Remote Application Client");
 	if (settings->ClientHostname)
 		snprintf(seat_name, sizeof(seat_name), "RDP %s", settings->ClientHostname);
 	else
