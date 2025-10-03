@@ -2705,7 +2705,7 @@ weston_rdp_backend_config_init(struct weston_rdp_backend_config *config)
 	config->no_clients_resize = 0;
 	config->force_no_compression = 0;
 	config->redirect_clipboard = false;
-	config->enable_persistent_seat = false;
+	config->enable_persistent_rail_seat = false;
 	config->audio_in_setup = NULL;
 	config->audio_in_teardown = NULL;
 	config->audio_out_setup = NULL;
@@ -2830,7 +2830,7 @@ load_rdp_backend(struct weston_compositor *c,
 	/* certain configurations are read from environment variables */
 	config.redirect_clipboard = read_rdp_config_bool("WESTON_RDP_CLIPBOARD", true);
 
-	config.enable_persistent_seat = read_rdp_config_bool("WESTON_RDP_PERSISTENT_SEAT", true);
+	config.enable_persistent_rail_seat = read_rdp_config_bool("WESTON_RDP_PERSISTENT_RAIL_SEAT", true);
 
 	audio_tmp = read_rdp_config_bool("WESTON_RDP_AUDIO_PLAYBACK", true);
 	if (audio_tmp) {

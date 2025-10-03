@@ -283,7 +283,7 @@ struct weston_rdp_backend_config {
 	int no_clients_resize;
 	int force_no_compression;
 	bool redirect_clipboard;
-	bool enable_persistent_seat;
+	bool enable_persistent_rail_seat;
 	rdp_audio_in_setup audio_in_setup;
 	rdp_audio_in_teardown audio_in_teardown;
 	rdp_audio_out_setup audio_out_setup;

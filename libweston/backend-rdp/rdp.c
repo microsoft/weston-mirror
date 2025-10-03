@@ -671,7 +671,7 @@ rdp_destroy(struct weston_compositor *ec)
 
 	freerdp_listener_free(b->listener);
 
-	free(b->persistent_seat);
+	free(b->persistent_rail_seat);
 	free(b->server_cert);
 	free(b->server_key);
 	free(b->rdp_key);
@@ -805,9 +805,9 @@ rdp_peer_context_free(freerdp_peer* client, RdpPeerContext* context)
 		weston_seat_release_pointer(context->item.seat);
 		/* save current seat for future use only when it's not saved yet */
 		if (settings->RemoteApplicationMode &&
-			b->enable_persistent_seat &&
-		       	!b->persistent_seat) {
-			b->persistent_seat = context->item.seat;
+			b->enable_persistent_rail_seat) {
+			assert(!b->persistent_rail_seat);
+			b->persistent_rail_seat = context->item.seat;
 		} else {
 			weston_seat_release(context->item.seat);
 			free(context->item.seat);
@@ -1205,7 +1205,12 @@ xf_peer_activate(freerdp_peer* client)
 	else
 		snprintf(seat_name, sizeof(seat_name), "RDP peer @%s", settings->ClientAddress);
 
-	if (!b->persistent_seat) {
+	if (settings->RemoteApplicationMode &&
+		b->persistent_rail_seat) {
+		/* reuse persistent seat for RAIL connection */
+		peersItem->seat = b->persistent_rail_seat;
+		b->persistent_rail_seat = NULL;
+	} else {
 		peersItem->seat = zalloc(sizeof(*peersItem->seat));
 		if (!peersItem->seat) {
 			xkb_keymap_unref(keymap);
@@ -1213,9 +1218,6 @@ xf_peer_activate(freerdp_peer* client)
 			goto error_exit;
 		}
 		weston_seat_init(peersItem->seat, b->compositor, seat_name);
-	} else {
-		peersItem->seat = b->persistent_seat;
-		b->persistent_seat = NULL;
 	}
 
 	weston_seat_init_keyboard(peersItem->seat, keymap);
@@ -2128,7 +2130,7 @@ rdp_backend_create(struct weston_compositor *compositor,
 	b->no_clients_resize = config->no_clients_resize;
 	b->force_no_compression = config->force_no_compression;
 	b->redirect_clipboard = config->redirect_clipboard;
-	b->enable_persistent_seat = config->enable_persistent_seat;
+	b->enable_persistent_rail_seat = config->enable_persistent_rail_seat;
 	b->rdp_monitor_refresh_rate = config->rdp_monitor_refresh_rate * 1000;
 	b->audio_in_setup = config->audio_in_setup;
 	b->audio_in_teardown = config->audio_in_teardown;
@@ -2316,7 +2318,7 @@ config_init_to_defaults(struct weston_rdp_backend_config *config)
 	config->no_clients_resize = 0;
 	config->force_no_compression = 0;
 	config->redirect_clipboard = false;
-	config->enable_persistent_seat = false;
+	config->enable_persistent_rail_seat = false;
 	config->rdp_monitor_refresh_rate = WESTON_RDP_MODE_FREQ;
 	config->rail_config.use_rdpapplist = false;
 	config->rail_config.use_shared_memory = false;
