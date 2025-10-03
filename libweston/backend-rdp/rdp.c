@@ -664,6 +664,9 @@ rdp_destroy(struct weston_compositor *ec)
 		b->debug = NULL;
 	}
 
+	if (b->persistent_rail_seat)
+		weston_seat_release(b->persistent_rail_seat);
+
 	weston_compositor_shutdown(ec);
 
 	wl_list_for_each_safe(base, next, &ec->head_list, compositor_link)
