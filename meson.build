@@ -1,6 +1,6 @@
 project('weston',
 	'c',
-	version: '9.0.0',
+	version: '14.0.2',
 	default_options: [
 		'warning_level=3',
 		'c_std=gnu99',
@@ -10,7 +10,7 @@ project('weston',
 	license: 'MIT/Expat',
 )
 
-libweston_major = 9
+libweston_major = 14
 
 # libweston_revision is manufactured to follow the autotools build's
 # library file naming, thanks to libtool
