@@ -109,6 +109,24 @@ png_write_func(void *closure, const unsigned char *data, unsigned int length)
 }
 
 static int
+source_offers_mime_type(struct weston_wm *wm, const char *mime_type)
+{
+	struct weston_seat *seat = weston_wm_pick_seat(wm);
+	struct weston_data_source *source;
+	char **p;
+
+	if (!seat || !seat->selection_data_source)
+		return 0;
+
+	source = seat->selection_data_source;
+	wl_array_for_each(p, &source->mime_types) {
+		if (strcmp(*p, mime_type) == 0)
+			return 1;
+	}
+	return 0;
+}
+
+static int
 convert_bmp_to_png_data(struct wl_array *source_data)
 {
 	unsigned char *bmp = source_data->data;
@@ -117,7 +135,8 @@ convert_bmp_to_png_data(struct wl_array *source_data)
 	int32_t width, height;
 	uint16_t bpp;
 	uint32_t compression;
-	int top_down, bmp_row_size, stride, x, y;
+	int top_down, stride, x, y;
+	size_t bmp_row_size;
 	unsigned char *pixels;
 	cairo_surface_t *surface;
 	struct wl_array png_data;
@@ -151,7 +170,7 @@ convert_bmp_to_png_data(struct wl_array *source_data)
 	if (!pixels)
 		return -1;
 
-	bmp_row_size = ((width * bpp / 8) + 3) & ~3;
+	bmp_row_size = (((size_t)width * bpp / 8) + 3) & ~3;
 
 	for (y = 0; y < height; y++) {
 		int src_y = top_down ? y : (height - 1 - y);
@@ -870,6 +889,11 @@ weston_wm_handle_selection_request(struct weston_wm *wm,
 		weston_wm_send_targets(wm);
 	} else if (selection_request->target == wm->atom.timestamp) {
 		weston_wm_send_timestamp(wm);
+	} else if (selection_request->target == wm->atom.image_png &&
+		   !source_offers_mime_type(wm, "image/png") &&
+		   source_offers_mime_type(wm, "image/bmp")) {
+		wm->convert_bmp_to_png = 1;
+		weston_wm_send_data(wm, wm->atom.image_png, "image/bmp");
 	} else {
 		const struct xwm_selection_format *fmt;
 
@@ -878,9 +902,6 @@ weston_wm_handle_selection_request(struct weston_wm *wm,
 			weston_wm_send_data(wm,
 					    xwm_atom_at_offset(wm, fmt->atom_offset),
 					    fmt->mime_type);
-		} else if (selection_request->target == wm->atom.image_png) {
-			wm->convert_bmp_to_png = 1;
-			weston_wm_send_data(wm, wm->atom.image_png, "image/bmp");
 		} else {
 			weston_log("unsupported selection target: %s\n",
 				   get_atom_name(wm->conn, selection_request->target));
