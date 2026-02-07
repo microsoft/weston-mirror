@@ -84,6 +84,7 @@ struct weston_wm {
 	xcb_get_property_reply_t *property_reply;
 	int property_start;
 	struct wl_array source_data;
+	int source_data_offset;
 	xcb_selection_request_event_t selection_request;
 	xcb_atom_t selection_target;
 	xcb_timestamp_t selection_timestamp;

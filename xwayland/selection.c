@@ -195,6 +195,9 @@ convert_bmp_to_png_data(struct wl_array *source_data)
 				g = src_row[x * 4 + 1];
 				r = src_row[x * 4 + 2];
 				a = src_row[x * 4 + 3];
+				r = (r * a + 127) / 255;
+				g = (g * a + 127) / 255;
+				b = (b * a + 127) / 255;
 			}
 			dst_row[x] = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
 				     ((uint32_t)g << 8) | b;
@@ -618,21 +621,29 @@ weston_wm_send_timestamp(struct weston_wm *wm)
 static int
 weston_wm_flush_source_data(struct weston_wm *wm)
 {
-	int length;
+	int remaining = wm->source_data.size - wm->source_data_offset;
+	int chunk = remaining;
+
+	if (wm->incr && chunk > (int)incr_chunk_size)
+		chunk = incr_chunk_size;
 
 	xcb_change_property(wm->conn,
 			    XCB_PROP_MODE_REPLACE,
 			    wm->selection_request.requestor,
 			    wm->selection_request.property,
 			    wm->selection_target,
-			    8, /* format */
-			    wm->source_data.size,
-			    wm->source_data.data);
+			    8,
+			    chunk,
+			    (char *)wm->source_data.data + wm->source_data_offset);
 	wm->selection_property_set = 1;
-	length = wm->source_data.size;
-	wm->source_data.size = 0;
+	wm->source_data_offset += chunk;
 
-	return length;
+	if (wm->source_data_offset >= (int)wm->source_data.size) {
+		wm->source_data.size = 0;
+		wm->source_data_offset = 0;
+	}
+
+	return chunk;
 }
 
 static int
@@ -676,20 +687,44 @@ weston_wm_read_data_source(int fd, uint32_t mask, void *data)
 			if (convert_bmp_to_png_data(&wm->source_data) != 0) {
 				weston_log("BMP to PNG conversion failed\n");
 				weston_wm_send_selection_notify(wm, XCB_ATOM_NONE);
+				if (wm->property_source)
+					wl_event_source_remove(wm->property_source);
+				wm->property_source = NULL;
+				close(fd);
+				wm->data_source_fd = -1;
+				wl_array_release(&wm->source_data);
+				wm->selection_request.requestor = XCB_NONE;
 			} else {
 				weston_log("bmp-to-png conversion: %zu bytes png\n",
 					   wm->source_data.size);
-				weston_wm_flush_source_data(wm);
-				weston_wm_send_selection_notify(wm,
-					wm->selection_request.property);
+				if (wm->property_source)
+					wl_event_source_remove(wm->property_source);
+				wm->property_source = NULL;
+				close(fd);
+				wm->data_source_fd = -1;
+				wm->source_data_offset = 0;
+
+				if (wm->source_data.size >= incr_chunk_size) {
+					wm->incr = 1;
+					xcb_change_property(wm->conn,
+							    XCB_PROP_MODE_REPLACE,
+							    wm->selection_request.requestor,
+							    wm->selection_request.property,
+							    wm->atom.incr,
+							    32,
+							    1, &incr_chunk_size);
+					wm->selection_property_set = 1;
+					wm->flush_property_on_delete = 1;
+					weston_wm_send_selection_notify(wm,
+						wm->selection_request.property);
+				} else {
+					weston_wm_flush_source_data(wm);
+					weston_wm_send_selection_notify(wm,
+						wm->selection_request.property);
+					wl_array_release(&wm->source_data);
+					wm->selection_request.requestor = XCB_NONE;
+				}
 			}
-			if (wm->property_source)
-				wl_event_source_remove(wm->property_source);
-			wm->property_source = NULL;
-			close(fd);
-			wm->data_source_fd = -1;
-			wl_array_release(&wm->source_data);
-			wm->selection_request.requestor = XCB_NONE;
 			wm->convert_bmp_to_png = 0;
 		}
 		return 1;
@@ -784,6 +819,7 @@ weston_wm_send_data(struct weston_wm *wm, xcb_atom_t target, const char *mime_ty
 	}
 
 	wl_array_init(&wm->source_data);
+	wm->source_data_offset = 0;
 	wm->selection_target = target;
 	wm->data_source_fd = p[0];
 	wm->property_source = wl_event_loop_add_fd(wm->server->loop,
@@ -812,7 +848,9 @@ weston_wm_send_incr_chunk(struct weston_wm *wm)
 		wm->flush_property_on_delete = 0;
 		length = weston_wm_flush_source_data(wm);
 
-		if (wm->data_source_fd >= 0) {
+		if (wm->source_data.size > 0) {
+			wm->flush_property_on_delete = 1;
+		} else if (wm->data_source_fd >= 0) {
 			wm->property_source =
 				wl_event_loop_add_fd(wm->server->loop,
 						     wm->data_source_fd,
