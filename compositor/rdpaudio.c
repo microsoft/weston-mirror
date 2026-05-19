@@ -41,9 +41,13 @@
 #include <libweston/libweston.h>
 #include <shared/xalloc.h>
 
+#include <freerdp/version.h>
+
+#if FREERDP_VERSION_MAJOR < 3
 static AUDIO_FORMAT rdp_audio_supported_audio_formats[] = {
 		{ WAVE_FORMAT_PCM, 2, 44100, 176400, 4, 16, 0, NULL },
 	};
+#endif
 
 #define AUDIO_LATENCY 5
 #define AUDIO_FRAMES_PER_RDP_PACKET (44100 * AUDIO_LATENCY / 1000)
@@ -67,6 +71,7 @@ typedef struct _rdp_audio_cmd_header {
 	};
 } rdp_audio_cmd_header;
 
+#if FREERDP_VERSION_MAJOR < 3
 static char*
 AUDIO_FORMAT_to_String(UINT16 format)
 {
@@ -669,10 +674,21 @@ rdp_audio_client_activated(RdpsndServerContext* context)
 		weston_log("RDPAudio - No agreeded format.\n");
 	}
 }
+#endif /* FREERDP_VERSION_MAJOR < 3 */
 
 void *
 rdp_audio_out_init(struct weston_compositor *c, HANDLE vcm)
 {
+#if FREERDP_VERSION_MAJOR >= 3
+	/* TODO: Port to the FreeRDP 3.x RdpsndServerContext API. The 2.x server
+	 * API used here (num_server_formats, server_formats, Activated callback,
+	 * src_format, ConfirmBlock, etc.) was fully replaced in 3.x. Returning
+	 * NULL is the supported "audio output unavailable" sentinel; the
+	 * compositor will continue without RDP audio playback. */
+	(void)c;
+	(void)vcm;
+	return NULL;
+#else
 	struct audio_out_private *priv;
 	char *s;
 
@@ -746,11 +762,17 @@ Error_Exit:
 
 	free(priv);
 	return NULL;
+#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }
 
 void
 rdp_audio_out_destroy(void *audio_out_private)
 {
+#if FREERDP_VERSION_MAJOR >= 3
+	/* Paired with the NULL-returning init: nothing to tear down. */
+	(void)audio_out_private;
+	return;
+#else
 	struct audio_out_private *priv = audio_out_private;
 
 	if (priv->rdpsnd_server_context) {
@@ -796,4 +818,5 @@ rdp_audio_out_destroy(void *audio_out_private)
 		priv->rdpsnd_server_context = NULL;
 	}
 	free(priv);
+#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }

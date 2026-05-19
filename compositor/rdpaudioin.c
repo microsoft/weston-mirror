@@ -42,6 +42,9 @@
 #include <libweston/libweston.h>
 #include <shared/xalloc.h>
 
+#include <freerdp/version.h>
+
+#if FREERDP_VERSION_MAJOR < 3
 static AUDIO_FORMAT rdp_audioin_supported_audio_formats[] = {
 		{ WAVE_FORMAT_PCM, 1, 44100, 88200, 2, 16, 0, NULL },
 	};
@@ -462,10 +465,22 @@ rdp_audioin_source_thread(void *context)
 
 	return NULL;
 }
+#endif /* FREERDP_VERSION_MAJOR < 3 */
 
 void *
 rdp_audio_in_init(struct weston_compositor *c, HANDLE vcm)
 {
+#if FREERDP_VERSION_MAJOR >= 3
+	/* TODO: Port to the FreeRDP 3.x audin_server_context PDU-based API
+	 * (SendVersion/SendFormats/SendOpen/SendFormatChange + callbacks).
+	 * The 2.x context members (num_server_formats, server_formats,
+	 * Opening, OpenResult, ReceiveSamples, dst_format, frames_per_packet)
+	 * have all been removed. NULL signals "no audio in" which the
+	 * compositor handles gracefully. */
+	(void)c;
+	(void)vcm;
+	return NULL;
+#else
 	struct audio_in_private *priv;
 
 	priv = xzalloc(sizeof *priv);
@@ -541,11 +556,17 @@ Error_Exit:
 	free(priv);
 
 	return NULL; // Continue without audio
+#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }
 
 void
 rdp_audio_in_destroy(void *audio_in_private)
 {
+#if FREERDP_VERSION_MAJOR >= 3
+	/* Paired with the NULL-returning init: nothing to tear down. */
+	(void)audio_in_private;
+	return;
+#else
 	struct audio_in_private *priv = audio_in_private;
 	if (priv->audin_server_context) {
 
@@ -577,4 +598,5 @@ rdp_audio_in_destroy(void *audio_in_private)
 		priv->audin_server_context = NULL;
 	}
 	free(priv);
+#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }
