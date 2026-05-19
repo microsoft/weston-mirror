@@ -183,7 +183,11 @@ rail_client_Exec_callback(bool freeOnly, void *arg)
 	const struct weston_rdprail_shell_api *api = b->rdprail_shell_api;
 	UINT result = RAIL_EXEC_E_FAIL;
 	RAIL_EXEC_RESULT_ORDER orderResult = {};
-	char *remoteProgramAndArgs = exec->RemoteApplicationProgram;
+	/* RemoteApplicationProgram is `const char *` in the 3.x rail.h struct
+	 * even though the buffer we receive here is one we own (allocated and
+	 * strcpy'd by rail_client_Exec below before dispatch). Track it as a
+	 * mutable pointer so we can free/replace it without warnings. */
+	char *remoteProgramAndArgs = (char *)exec->RemoteApplicationProgram;
 
 	rdp_debug(b, "Client ExecOrder:0x%08X, Program:%s, WorkingDir:%s, RemoteApplicationArguments:%s\n",
 		  (UINT)exec->flags,
@@ -244,9 +248,12 @@ send_result:
 	free(orderResult.exeOrFile.string);
 	if (remoteProgramAndArgs != exec->RemoteApplicationProgram)
 		free(remoteProgramAndArgs);
-	free(exec->RemoteApplicationProgram);
-	free(exec->RemoteApplicationWorkingDir);
-	free(exec->RemoteApplicationArguments);
+	/* These buffers were xmalloc'd by rail_client_Exec; the const-ness of
+	 * the struct fields is a 3.x rail.h contract for the caller, not for
+	 * ourselves as the owner. Cast away const to free. */
+	free((char *)exec->RemoteApplicationProgram);
+	free((char *)exec->RemoteApplicationWorkingDir);
+	free((char *)exec->RemoteApplicationArguments);
 
 	free(data);
 }
@@ -258,19 +265,19 @@ rail_client_Exec(RailServerContext *context, const RAIL_EXEC_ORDER *arg)
 
 	exec_order.flags = arg->flags;
 	if (arg->RemoteApplicationProgram) {
-		exec_order.RemoteApplicationProgram = xmalloc(strlen(arg->RemoteApplicationProgram) + 1);
-		strcpy(exec_order.RemoteApplicationProgram,
-		       arg->RemoteApplicationProgram);
+		char *buf = xmalloc(strlen(arg->RemoteApplicationProgram) + 1);
+		strcpy(buf, arg->RemoteApplicationProgram);
+		exec_order.RemoteApplicationProgram = buf;
 	}
 	if (arg->RemoteApplicationWorkingDir) {
-		exec_order.RemoteApplicationWorkingDir = xmalloc(strlen(arg->RemoteApplicationWorkingDir) + 1);
-		strcpy(exec_order.RemoteApplicationWorkingDir,
-		       arg->RemoteApplicationWorkingDir);
+		char *buf = xmalloc(strlen(arg->RemoteApplicationWorkingDir) + 1);
+		strcpy(buf, arg->RemoteApplicationWorkingDir);
+		exec_order.RemoteApplicationWorkingDir = buf;
 	}
 	if (arg->RemoteApplicationArguments) {
-		exec_order.RemoteApplicationArguments = xmalloc(strlen(arg->RemoteApplicationArguments) + 1);
-		strcpy(exec_order.RemoteApplicationArguments,
-		       arg->RemoteApplicationArguments);
+		char *buf = xmalloc(strlen(arg->RemoteApplicationArguments) + 1);
+		strcpy(buf, arg->RemoteApplicationArguments);
+		exec_order.RemoteApplicationArguments = buf;
 	}
 	RDP_DISPATCH_TO_DISPLAY_LOOP(context, exec, &exec_order,
 				     rail_client_Exec_callback);
