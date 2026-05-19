@@ -1125,24 +1125,8 @@ xf_peer_activate(freerdp_peer* client)
 
 	/* override settings by env variables */
 	(void)freerdp_settings_set_bool(settings, FreeRDP_RedirectClipboard, b->redirect_clipboard);
-#if FREERDP_VERSION_MAJOR >= 3
-	/* TODO: rdpsnd/audin server-side context APIs were rewritten in FreeRDP 3.x to a
-	 * PDU-callback model (SendVersion/SendFormats/SendOpen/IncomingData...). The wslg
-	 * port has not been completed yet, so disable audio negotiation on FreeRDP 3 to
-	 * avoid advertising a capability we cannot service. */
-	{
-		static bool warned;
-		if (!warned) {
-			weston_log("RDP audio playback/capture disabled: FreeRDP 3.x port pending\n");
-			warned = true;
-		}
-	}
-	(void)freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, FALSE);
-	(void)freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, FALSE);
-#else
 	(void)freerdp_settings_set_bool(settings, FreeRDP_AudioPlayback, b->audio_out_setup && b->audio_out_teardown);
 	(void)freerdp_settings_set_bool(settings, FreeRDP_AudioCapture, b->audio_in_setup && b->audio_in_teardown);
-#endif
 
 	if (freerdp_settings_get_bool(settings, FreeRDP_RemoteApplicationMode) ||
 		freerdp_settings_get_bool(settings, FreeRDP_RedirectClipboard) ||

@@ -43,11 +43,9 @@
 
 #include <freerdp/version.h>
 
-#if FREERDP_VERSION_MAJOR < 3
 static AUDIO_FORMAT rdp_audio_supported_audio_formats[] = {
 		{ WAVE_FORMAT_PCM, 2, 44100, 176400, 4, 16, 0, NULL },
 	};
-#endif
 
 #define AUDIO_LATENCY 5
 #define AUDIO_FRAMES_PER_RDP_PACKET (44100 * AUDIO_LATENCY / 1000)
@@ -71,7 +69,6 @@ typedef struct _rdp_audio_cmd_header {
 	};
 } rdp_audio_cmd_header;
 
-#if FREERDP_VERSION_MAJOR < 3
 static char*
 AUDIO_FORMAT_to_String(UINT16 format)
 {
@@ -661,8 +658,11 @@ rdp_audio_client_activated(RdpsndServerContext* context)
 		rdp_audio_debug(priv, "rdp_audio_server_activated: bytesPerFrame:%d, latency:%d\n", 
 				priv->bytesPerFrame, context->latency);
 
-		context->SelectFormat(context, format);
-		context->SetVolume(context, 0x7FFF, 0x7FFF);
+		if (context->SelectFormat(context, format) != CHANNEL_RC_OK) {
+			weston_log("RDPAudio - SelectFormat failed; audio output disabled.\n");
+			return;
+		}
+		(void)context->SetVolume(context, 0x7FFF, 0x7FFF);
 
 		priv->pulseAudioSinkListenerFd = rdp_audio_setup_listener();
 		if (priv->pulseAudioSinkListenerFd < 0) {
@@ -674,21 +674,10 @@ rdp_audio_client_activated(RdpsndServerContext* context)
 		weston_log("RDPAudio - No agreeded format.\n");
 	}
 }
-#endif /* FREERDP_VERSION_MAJOR < 3 */
 
 void *
 rdp_audio_out_init(struct weston_compositor *c, HANDLE vcm)
 {
-#if FREERDP_VERSION_MAJOR >= 3
-	/* TODO: Port to the FreeRDP 3.x RdpsndServerContext API. The 2.x server
-	 * API used here (num_server_formats, server_formats, Activated callback,
-	 * src_format, ConfirmBlock, etc.) was fully replaced in 3.x. Returning
-	 * NULL is the supported "audio output unavailable" sentinel; the
-	 * compositor will continue without RDP audio playback. */
-	(void)c;
-	(void)vcm;
-	return NULL;
-#else
 	struct audio_out_private *priv;
 	char *s;
 
@@ -722,7 +711,7 @@ rdp_audio_out_init(struct weston_compositor *c, HANDLE vcm)
 		goto Error_Exit;
 	}
 	memcpy(audio_formats, rdp_audio_supported_audio_formats, sizeof rdp_audio_supported_audio_formats);
-    
+
 	priv->rdpsnd_server_context->data = (void*)priv;
 	priv->rdpsnd_server_context->Activated = rdp_audio_client_activated;
 	priv->rdpsnd_server_context->ConfirmBlock = rdp_audio_client_confirm_block;
@@ -738,6 +727,8 @@ rdp_audio_out_init(struct weston_compositor *c, HANDLE vcm)
 			weston_log("RDPAudio - force static channel.\n");
 		}
 	}
+#else
+	(void)s;
 #endif // HAVE_RDPAUDIO_DYNAMIC_VIRTUAL_CHANNEL
 
 	/* Calling Initialize does Start as well */
@@ -762,17 +753,11 @@ Error_Exit:
 
 	free(priv);
 	return NULL;
-#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }
 
 void
 rdp_audio_out_destroy(void *audio_out_private)
 {
-#if FREERDP_VERSION_MAJOR >= 3
-	/* Paired with the NULL-returning init: nothing to tear down. */
-	(void)audio_out_private;
-	return;
-#else
 	struct audio_out_private *priv = audio_out_private;
 
 	if (priv->rdpsnd_server_context) {
@@ -806,8 +791,8 @@ rdp_audio_out_destroy(void *audio_out_private)
 		assert(priv->pulseAudioSinkFd < 0);
 		assert(priv->audioBuffer == NULL);
 
-		priv->rdpsnd_server_context->Close(priv->rdpsnd_server_context);
-		priv->rdpsnd_server_context->Stop(priv->rdpsnd_server_context);
+		(void)priv->rdpsnd_server_context->Close(priv->rdpsnd_server_context);
+		(void)priv->rdpsnd_server_context->Stop(priv->rdpsnd_server_context);
 
 		if (priv->audioSem != -1) {
 			close(priv->audioSem);
@@ -818,5 +803,4 @@ rdp_audio_out_destroy(void *audio_out_private)
 		priv->rdpsnd_server_context = NULL;
 	}
 	free(priv);
-#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }

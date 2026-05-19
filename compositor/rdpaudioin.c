@@ -43,8 +43,8 @@
 #include <shared/xalloc.h>
 
 #include <freerdp/version.h>
+#include <winpr/stream.h>
 
-#if FREERDP_VERSION_MAJOR < 3
 static AUDIO_FORMAT rdp_audioin_supported_audio_formats[] = {
 		{ WAVE_FORMAT_PCM, 1, 44100, 88200, 2, 16, 0, NULL },
 	};
@@ -311,6 +311,7 @@ rdp_audioin_setup_listener(struct audio_in_private *priv)
 	return fd;
 }
 
+#if FREERDP_VERSION_MAJOR < 3
 static UINT 
 rdp_audioin_client_opening(audin_server_context* context)
 {
@@ -405,6 +406,112 @@ rdp_audioin_client_receive_samples(
 
 	return 0;
 }
+#else /* FREERDP_VERSION_MAJOR >= 3 */
+
+/*
+ * In FreeRDP 3.x the audin server API was reworked into a PDU-callback
+ * model. The default ReceiveFormats handler in libfreerdp-server picks a
+ * compatible format from the client's list but then calls SendOpen with a
+ * hardcoded stereo 44.1kHz 16-bit captureFormat (see
+ * channels/audin/server/audin.c:send_open in FreeRDP). WSLg's pulse audio
+ * source pipe expects mono PCM, so we override ReceiveFormats to send the
+ * negotiated format (mono) back to the client in the SNDIN_OPEN PDU.
+ */
+static UINT
+rdp_audioin_client_receive_formats(audin_server_context* context,
+				   const SNDIN_FORMATS* formats)
+{
+	struct audio_in_private *priv = context->userdata;
+	const AUDIO_FORMAT *server_format = &rdp_audioin_supported_audio_formats[0];
+	UINT32 matched_index = UINT32_MAX;
+	SNDIN_OPEN open = { 0 };
+
+	rdp_audio_debug(priv, "RDP AudioIn ReceiveFormats: %u client formats.\n",
+			formats->NumFormats);
+
+	for (UINT32 i = 0; i < formats->NumFormats; i++) {
+		const AUDIO_FORMAT *cf = &formats->SoundFormats[i];
+
+		rdp_audio_debug(priv, "\t[%u] - Format(%s) - Bits(%d), Channels(%d), Frequency(%d)\n",
+				i,
+				AUDIO_FORMAT_to_String(cf->wFormatTag),
+				cf->wBitsPerSample,
+				cf->nChannels,
+				cf->nSamplesPerSec);
+
+		if (cf->wFormatTag == server_format->wFormatTag &&
+		    cf->nChannels == server_format->nChannels &&
+		    cf->nSamplesPerSec == server_format->nSamplesPerSec &&
+		    cf->wBitsPerSample == server_format->wBitsPerSample) {
+			matched_index = i;
+			rdp_audio_debug(priv, "RDPAudioIn - Agreed on format %u.\n", i);
+			break;
+		}
+	}
+
+	if (matched_index == UINT32_MAX) {
+		weston_log("RDPAudioIn - No agreeded format.\n");
+		return ERROR_INVALID_DATA;
+	}
+
+	/*
+	 * 10ms of audio per packet — matches the 2.x frames_per_packet
+	 * setting (nSamplesPerSec / 100).
+	 */
+	open.FramesPerPacket = server_format->nSamplesPerSec / 100;
+	open.initialFormat = matched_index;
+	open.captureFormat = *server_format;
+
+	priv->isAudioInStreamOpened = TRUE;
+
+	return context->SendOpen(context, &open);
+}
+
+static UINT
+rdp_audioin_client_data(audin_server_context* context,
+			const SNDIN_DATA* data)
+{
+	struct audio_in_private *priv = context->userdata;
+	const AUDIO_FORMAT *server_format = &rdp_audioin_supported_audio_formats[0];
+	const BYTE *buffer;
+	size_t bytes;
+	ssize_t sent;
+
+	if (!priv->isAudioInStreamOpened || priv->pulseAudioSourceFd == -1) {
+		weston_log("RDPAudioIn - audio stream is not opened.\n");
+		return CHANNEL_RC_OK;
+	}
+
+	bytes = Stream_Length(data->Data);
+	if (bytes == 0)
+		return CHANNEL_RC_OK;
+
+	buffer = Stream_Buffer(data->Data);
+	assert(buffer != NULL);
+	assert(server_format->wFormatTag == WAVE_FORMAT_PCM);
+	assert(server_format->nChannels == 1);
+	assert(server_format->nSamplesPerSec == 44100);
+	assert(server_format->wBitsPerSample == 16);
+
+	sent = send(priv->pulseAudioSourceFd, buffer, bytes, 0);
+	if (sent != (ssize_t)bytes) {
+		rdp_audio_debug(priv, "RDP AudioIn source send failed (sent:%zd, bytes:%zu) %s\n",
+				sent, bytes, strerror(errno));
+
+		/* Unblock worker thread to close pipe to pulseaudio */
+		uint64_t one = 1;
+		if (write(priv->closeAudioSourceFd, &one, sizeof(one)) != sizeof(uint64_t)) {
+			weston_log("RDP AudioIn error at Data while writing to closeAudioSourceFd (%s)\n", strerror(errno));
+			return ERROR_INTERNAL_ERROR;
+		}
+
+		if (sent <= 0)
+			return ERROR_INTERNAL_ERROR;
+	}
+
+	return CHANNEL_RC_OK;
+}
+#endif /* FREERDP_VERSION_MAJOR >= 3 */
 
 static void*
 rdp_audioin_source_thread(void *context)
@@ -465,22 +572,10 @@ rdp_audioin_source_thread(void *context)
 
 	return NULL;
 }
-#endif /* FREERDP_VERSION_MAJOR < 3 */
 
 void *
 rdp_audio_in_init(struct weston_compositor *c, HANDLE vcm)
 {
-#if FREERDP_VERSION_MAJOR >= 3
-	/* TODO: Port to the FreeRDP 3.x audin_server_context PDU-based API
-	 * (SendVersion/SendFormats/SendOpen/SendFormatChange + callbacks).
-	 * The 2.x context members (num_server_formats, server_formats,
-	 * Opening, OpenResult, ReceiveSamples, dst_format, frames_per_packet)
-	 * have all been removed. NULL signals "no audio in" which the
-	 * compositor handles gracefully. */
-	(void)c;
-	(void)vcm;
-	return NULL;
-#else
 	struct audio_in_private *priv;
 
 	priv = xzalloc(sizeof *priv);
@@ -499,6 +594,24 @@ rdp_audio_in_init(struct weston_compositor *c, HANDLE vcm)
 	priv->pulseAudioSourceFd = -1;
 	priv->closeAudioSourceFd = -1;
 
+#if FREERDP_VERSION_MAJOR >= 3
+	priv->audin_server_context->userdata = (void*)priv;
+	/*
+	 * Override ReceiveFormats to send our negotiated (mono) captureFormat
+	 * in the SNDIN_OPEN PDU instead of the default-handler's hardcoded
+	 * stereo. The default ReceiveVersion / ReceiveFormatChange handlers
+	 * installed by audin_server_context_new are fine to keep.
+	 */
+	priv->audin_server_context->ReceiveFormats = rdp_audioin_client_receive_formats;
+	priv->audin_server_context->Data = rdp_audioin_client_data;
+
+	if (!audin_server_set_formats(priv->audin_server_context,
+				      ARRAYSIZE(rdp_audioin_supported_audio_formats),
+				      rdp_audioin_supported_audio_formats)) {
+		weston_log("RDPAudioIn - audin_server_set_formats failed.\n");
+		goto Error_Exit;
+	}
+#else
 	// this will be freed by FreeRDP at audin_server_context_free.
 	AUDIO_FORMAT *audio_formats = malloc(sizeof rdp_audioin_supported_audio_formats);
 	if (!audio_formats) {
@@ -515,6 +628,7 @@ rdp_audio_in_init(struct weston_compositor *c, HANDLE vcm)
 	priv->audin_server_context->server_formats = audio_formats;
 	priv->audin_server_context->dst_format = &rdp_audioin_supported_audio_formats[0];
 	priv->audin_server_context->frames_per_packet = rdp_audioin_supported_audio_formats[0].nSamplesPerSec / 100; // 10ms per packet
+#endif /* FREERDP_VERSION_MAJOR >= 3 */
 
 	priv->closeAudioSourceFd = eventfd(0, EFD_CLOEXEC);
 	if (priv->closeAudioSourceFd < 0) {
@@ -556,17 +670,11 @@ Error_Exit:
 	free(priv);
 
 	return NULL; // Continue without audio
-#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }
 
 void
 rdp_audio_in_destroy(void *audio_in_private)
 {
-#if FREERDP_VERSION_MAJOR >= 3
-	/* Paired with the NULL-returning init: nothing to tear down. */
-	(void)audio_in_private;
-	return;
-#else
 	struct audio_in_private *priv = audio_in_private;
 	if (priv->audin_server_context) {
 
@@ -598,5 +706,4 @@ rdp_audio_in_destroy(void *audio_in_private)
 		priv->audin_server_context = NULL;
 	}
 	free(priv);
-#endif /* FREERDP_VERSION_MAJOR >= 3 */
 }
