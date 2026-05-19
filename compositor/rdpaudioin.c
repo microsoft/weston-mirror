@@ -551,7 +551,7 @@ rdp_audioin_source_thread(void *context)
 					weston_log("RDP AudioIn wait on eventfd failed. thread exiting. %s\n", strerror(errno));
 					break;
 				}
-				priv->audin_server_context->Close(priv->audin_server_context);
+				(void)priv->audin_server_context->Close(priv->audin_server_context);
 				rdp_audio_debug(priv, "RDP AudioIn closed.\n");
 			} else {
 				weston_log("Failed to open audio in connection with RDP client.\n");
@@ -563,7 +563,7 @@ rdp_audioin_source_thread(void *context)
 	}
 
 	if (priv->audin_server_context->IsOpen(priv->audin_server_context))
-		priv->audin_server_context->Close(priv->audin_server_context);
+		(void)priv->audin_server_context->Close(priv->audin_server_context);
 
 	if (priv->pulseAudioSourceFd != -1) {
 		close(priv->pulseAudioSourceFd);
