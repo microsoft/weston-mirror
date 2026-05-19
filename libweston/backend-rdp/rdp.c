@@ -1866,26 +1866,26 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 #if FREERDP_VERSION_MAJOR >= 3
 	/* The legacy "rdp4" key path is gone in FreeRDP 3.x; only TLS is supported. */
 	if (is_tls_enabled(b)) {
+		rdpPrivateKey *key = NULL;
+		rdpCertificate *cert = NULL;
 		if (using_session_tls(b)) {
-			rdpPrivateKey *key = freerdp_key_new_from_pem(b->server_key_content);
-			rdpCertificate *cert = freerdp_certificate_new_from_pem(b->server_cert_content);
-			if (!key || !cert) {
-				rdp_debug_error(b, "failed to construct PEM cert/key for RDP TLS\n");
-				goto error_initialize;
-			}
-			if (!freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key, 1) ||
-			    !freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerCertificate, cert, 1)) {
-				rdp_debug_error(b, "failed to apply RDP server PEM cert/key\n");
-				goto error_initialize;
-			}
+			key = freerdp_key_new_from_pem(b->server_key_content);
+			cert = freerdp_certificate_new_from_pem(b->server_cert_content);
 		} else {
-			/* WSLg in production uses the session-generated TLS path via Hyper-V
-			 * vsock (CertificateContent + PrivateKeyContent from the host). The
-			 * file-cert path used to be supported via settings->{Certificate,PrivateKey}File
-			 * but those fields were removed in FreeRDP 3.x. Loading from disk and
-			 * calling freerdp_{key,certificate}_new_from_pem() is left for a follow-up
-			 * once a real consumer for the file-cert path exists. */
-			rdp_debug_error(b, "FreeRDP 3.x file-based cert/key path is not yet implemented; use session-generated TLS or run against FreeRDP 2.x\n");
+			key = freerdp_key_new_from_file(b->server_key);
+			cert = freerdp_certificate_new_from_file(b->server_cert);
+		}
+		if (!key || !cert) {
+			rdp_debug_error(b, "failed to load RDP server TLS cert/key\n");
+			freerdp_key_free(key);
+			freerdp_certificate_free(cert);
+			goto error_initialize;
+		}
+		if (!freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key, 1) ||
+		    !freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerCertificate, cert, 1)) {
+			rdp_debug_error(b, "failed to apply RDP server PEM cert/key\n");
+			freerdp_key_free(key);
+			freerdp_certificate_free(cert);
 			goto error_initialize;
 		}
 	} else {
