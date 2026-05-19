@@ -28,14 +28,6 @@
 
 #include <freerdp/version.h>
 
-#if FREERDP_VERSION_MAJOR >= 3
-/* Temporary workaround for SETTINGS_DEPRECATED attribute warnings.
- * Allows the rdp-backend to keep using direct struct member access on
- * rdpSettings while the migration to freerdp_settings_get/set_* accessors
- * is performed file-by-file. Remove once all direct accesses are gone. */
-#define FREERDP_SETTINGS_INTERNAL_USE
-#endif
-
 #include <freerdp/freerdp.h>
 #include <freerdp/listener.h>
 #include <freerdp/update.h>

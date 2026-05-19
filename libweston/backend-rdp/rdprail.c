@@ -1019,9 +1019,9 @@ rail_client_LanguageImeInfo_callback(bool freeOnly, void *arg)
 		}
 
 		if (new_keyboard_layout &&
-		    (new_keyboard_layout != settings->KeyboardLayout)) {
-			convert_rdp_keyboard_to_xkb_rule_names(settings->KeyboardType,
-							       settings->KeyboardSubType,
+		    (new_keyboard_layout != freerdp_settings_get_uint32(settings, FreeRDP_KeyboardLayout))) {
+			convert_rdp_keyboard_to_xkb_rule_names(freerdp_settings_get_uint32(settings, FreeRDP_KeyboardType),
+							       freerdp_settings_get_uint32(settings, FreeRDP_KeyboardSubType),
 							       new_keyboard_layout,
 							       &xkbRuleNames);
 			if (xkbRuleNames.layout) {
@@ -1030,7 +1030,7 @@ rail_client_LanguageImeInfo_callback(bool freeOnly, void *arg)
 				if (keymap) {
 					weston_seat_update_keymap(peer_ctx->item.seat, keymap);
 					xkb_keymap_unref(keymap);
-					settings->KeyboardLayout = new_keyboard_layout;
+					(void)freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, new_keyboard_layout);
 					rdp_debug(b, "%s: new keyboard layout: 0x%x\n",
 						__func__, new_keyboard_layout);
 				}
@@ -1038,8 +1038,8 @@ rail_client_LanguageImeInfo_callback(bool freeOnly, void *arg)
 			if (!keymap) {
 				rdp_debug_error(b, "%s: Failed to switch to kbd_layout:0x%x kbd_type:0x%x kbd_subType:0x%x\n",
 						__func__, new_keyboard_layout,
-						settings->KeyboardType,
-						settings->KeyboardSubType);
+						freerdp_settings_get_uint32(settings, FreeRDP_KeyboardType),
+						freerdp_settings_get_uint32(settings, FreeRDP_KeyboardSubType));
 
                                 rdp_debug_error(b, "%s: Resetting default keymap\n", __func__);
                                 keymap = xkb_keymap_new_from_names(peer_ctx->item.seat->compositor->xkb_context,
@@ -1047,7 +1047,7 @@ rail_client_LanguageImeInfo_callback(bool freeOnly, void *arg)
                                                                    0);
                                 weston_seat_update_keymap(peer_ctx->item.seat, keymap);
                                 xkb_keymap_unref(keymap);
-                                settings->KeyboardLayout = new_keyboard_layout;
+                                (void)freerdp_settings_set_uint32(settings, FreeRDP_KeyboardLayout, new_keyboard_layout);
 			}
 		}
 	}
@@ -1526,7 +1526,7 @@ rdp_rail_create_window(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	if (!b->rdp_peer->context->settings->HiDefRemoteApp)
+	if (!freerdp_settings_get_bool(b->rdp_peer->context->settings, FreeRDP_HiDefRemoteApp))
 		return;
 
 	if (!b->rdp_peer->context) {
@@ -3285,7 +3285,7 @@ disp_client_monitor_layout_change(DispServerContext *context, const DISPLAY_CONT
 
 	rdp_debug(b, "Client: DisplayLayoutChange: monitor count:0x%x\n", display_control->NumMonitors);
 
-	assert(settings->HiDefRemoteApp);
+	assert(freerdp_settings_get_bool(settings, FreeRDP_HiDefRemoteApp));
 
 	data = xmalloc(sizeof(*data) + (sizeof(rdpMonitor) * display_control->NumMonitors));
 
@@ -3379,13 +3379,13 @@ rdp_rail_peer_activate(freerdp_peer* client)
 	/* In RAIL mode, client must not be resized */
 	assert(b->no_clients_resize == 0);
 	/* Server must not ask client to resize */
-	settings->DesktopResize = FALSE;
+	(void)freerdp_settings_set_bool(settings, FreeRDP_DesktopResize, FALSE);
 
 	/* HiDef requires graphics pipeline to be supported */
-	if (settings->SupportGraphicsPipeline == FALSE) {
-		if (settings->HiDefRemoteApp) {
+	if (freerdp_settings_get_bool(settings, FreeRDP_SupportGraphicsPipeline) == FALSE) {
+		if (freerdp_settings_get_bool(settings, FreeRDP_HiDefRemoteApp)) {
 			rdp_debug_error(b, "HiDef remoting is going to be disabled because client doesn't support graphics pipeline\n");
-			settings->HiDefRemoteApp = FALSE;
+			(void)freerdp_settings_set_bool(settings, FreeRDP_HiDefRemoteApp, FALSE);
 		}
 	}
 
@@ -3413,7 +3413,7 @@ rdp_rail_peer_activate(freerdp_peer* client)
 	rail_server_started = true;
 
 	/* send handshake to client */
-	if (settings->RemoteApplicationSupportLevel & RAIL_LEVEL_HANDSHAKE_EX_SUPPORTED) {
+	if (freerdp_settings_get_uint32(settings, FreeRDP_RemoteApplicationSupportLevel) & RAIL_LEVEL_HANDSHAKE_EX_SUPPORTED) {
 		RAIL_HANDSHAKE_EX_ORDER handshakeEx = {};
 		uint32_t railHandshakeFlags = TS_RAIL_ORDER_HANDSHAKEEX_FLAGS_HIDEF |
 					      TS_RAIL_ORDER_HANDSHAKE_EX_FLAGS_EXTENDED_SPI_SUPPORTED;
@@ -3759,7 +3759,7 @@ rdp_rail_send_window_minmax_info(
 	RAIL_MINMAXINFO_ORDER minmax_order;
 	int dummyX = 0, dummyY = 0;
 
-	if (!b->rdp_peer || !b->rdp_peer->context->settings->HiDefRemoteApp) {
+	if (!b->rdp_peer || !freerdp_settings_get_bool(b->rdp_peer->context->settings, FreeRDP_HiDefRemoteApp)) {
 		return;
 	}
 
@@ -3833,7 +3833,7 @@ rdp_rail_start_window_move(
 	struct weston_view* view;
 	RailServerContext *rail_ctx;
 
-	if (!b->rdp_peer || !b->rdp_peer->context->settings->HiDefRemoteApp)
+	if (!b->rdp_peer || !freerdp_settings_get_bool(b->rdp_peer->context->settings, FreeRDP_HiDefRemoteApp))
 		return;
 
 	peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
@@ -3915,7 +3915,7 @@ rdp_rail_end_window_move(struct weston_surface *surface)
 	int numViews = 0;
 	struct weston_view *view;
 
-	if (!b->rdp_peer || !b->rdp_peer->context->settings->HiDefRemoteApp) {
+	if (!b->rdp_peer || !freerdp_settings_get_bool(b->rdp_peer->context->settings, FreeRDP_HiDefRemoteApp)) {
 		return;
 	}
 
@@ -4511,7 +4511,7 @@ rdp_rail_set_window_icon(struct weston_surface *surface, pixman_image_t *icon)
 	peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
 	update = b->rdp_peer->context->update;
 
-	if (!b->rdp_peer->context->settings->HiDefRemoteApp)
+	if (!freerdp_settings_get_bool(b->rdp_peer->context->settings, FreeRDP_HiDefRemoteApp))
 		return;
 
 	assert_compositor_thread(b);
@@ -4687,7 +4687,7 @@ rdp_rail_notify_app_list(void *rdp_backend,
 		return false;
 	}
 
-	if (!b->rdp_peer->context->settings->HiDefRemoteApp)
+	if (!freerdp_settings_get_bool(b->rdp_peer->context->settings, FreeRDP_HiDefRemoteApp))
 		return true;
 
 	peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
