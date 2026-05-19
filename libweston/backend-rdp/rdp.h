@@ -28,6 +28,14 @@
 
 #include <freerdp/version.h>
 
+#if FREERDP_VERSION_MAJOR >= 3
+/* Temporary workaround for SETTINGS_DEPRECATED attribute warnings.
+ * Allows the rdp-backend to keep using direct struct member access on
+ * rdpSettings while the migration to freerdp_settings_get/set_* accessors
+ * is performed file-by-file. Remove once all direct accesses are gone. */
+#define FREERDP_SETTINGS_INTERNAL_USE
+#endif
+
 #include <freerdp/freerdp.h>
 #include <freerdp/listener.h>
 #include <freerdp/update.h>
@@ -144,7 +152,7 @@ struct rdp_backend {
 	struct weston_surface *proxy_surface;
 
 #ifdef HAVE_FREERDP_RDPAPPLIST_H
-	/* import from libfreerdp-server2.so */
+	/* import from librdpapplist-server.so (built from wslg/rdpapplist/) */
 	RdpAppListServerContext *(*rdpapplist_server_context_new)(HANDLE vcm);
 	void (*rdpapplist_server_context_free)(RdpAppListServerContext* context);
 
@@ -153,7 +161,7 @@ struct rdp_backend {
 #endif // HAVE_FREERDP_RDPAPPLIST_H
 
 #ifdef HAVE_FREERDP_GFXREDIR_H
-	/* import from libfreerdp-server2.so */
+	/* import from libfreerdp-server{2,3}.so */
 	GfxRedirServerContext *(*gfxredir_server_context_new)(HANDLE vcm);
 	void (*gfxredir_server_context_free)(GfxRedirServerContext* context);
 

@@ -4076,7 +4076,13 @@ rdp_drdynvc_init(freerdp_peer *client)
 	peer_ctx->drdynvc_server_context = vc_ctx;
 
 	/* Force Dynamic virtual channel to exchange caps */
+#if FREERDP_VERSION_MAJOR >= 3
+	/* In FreeRDP 3 the initial drdynvc state may be other than NONE before
+	 * READY is reached (e.g. INITIALIZED); compare against READY directly. */
+	if (WTSVirtualChannelManagerGetDrdynvcState(peer_ctx->vcm) != DRDYNVC_STATE_READY) {
+#else
 	if (WTSVirtualChannelManagerGetDrdynvcState(peer_ctx->vcm) == DRDYNVC_STATE_NONE) {
+#endif
 		int waitRetry = 0;
 
 		client->activated = TRUE;
@@ -4088,7 +4094,13 @@ rdp_drdynvc_init(freerdp_peer *client)
 			}
 			usleep(10000); /* wait 0.01 sec. */
 			client->CheckFileDescriptor(client);
+#if FREERDP_VERSION_MAJOR >= 3
+			/* FreeRDP 3 asserts on calling CheckFileDescriptor before drdynvc has joined */
+			if (WTSVirtualChannelManagerIsChannelJoined(peer_ctx->vcm, "drdynvc"))
+				WTSVirtualChannelManagerCheckFileDescriptor(peer_ctx->vcm);
+#else
 			WTSVirtualChannelManagerCheckFileDescriptor(peer_ctx->vcm);
+#endif
 		}
 	}
 

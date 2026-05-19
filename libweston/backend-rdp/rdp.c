@@ -736,9 +736,16 @@ rdp_peer_context_new(freerdp_peer* client, RdpPeerContext* context)
 	if (!context->rfx_context)
 		return FALSE;
 
+#if FREERDP_VERSION_MAJOR >= 3
+	rfx_context_set_mode(context->rfx_context, RLGR3);
+	rfx_context_reset(context->rfx_context,
+			  client->context->settings->DesktopWidth,
+			  client->context->settings->DesktopHeight);
+#else
 	context->rfx_context->mode = RLGR3;
 	context->rfx_context->width = client->context->settings->DesktopWidth;
 	context->rfx_context->height = client->context->settings->DesktopHeight;
+#endif
 	rfx_context_set_pixel_format(context->rfx_context, DEFAULT_PIXEL_FORMAT);
 
 	context->nsc_context = nsc_context_new();
@@ -839,6 +846,11 @@ rdp_client_activity(int fd, uint32_t mask, void *data)
 
 	if (peerCtx && peerCtx->vcm)
 	{
+#if FREERDP_VERSION_MAJOR >= 3
+		/* FreeRDP 3 asserts on calling CheckFileDescriptor before drdynvc joined */
+		if (!WTSVirtualChannelManagerIsChannelJoined(peerCtx->vcm, "drdynvc"))
+			return 0;
+#endif
 		if (!WTSVirtualChannelManagerCheckFileDescriptor(peerCtx->vcm)) {
 			rdp_debug_error(rdpBackend, "failed to check FreeRDP WTS VC file descriptor for %p\n", client);
 			goto out_clean;
@@ -1113,8 +1125,24 @@ xf_peer_activate(freerdp_peer* client)
 
 	/* override settings by env variables */
 	settings->RedirectClipboard = b->redirect_clipboard;
+#if FREERDP_VERSION_MAJOR >= 3
+	/* TODO: rdpsnd/audin server-side context APIs were rewritten in FreeRDP 3.x to a
+	 * PDU-callback model (SendVersion/SendFormats/SendOpen/IncomingData...). The wslg
+	 * port has not been completed yet, so disable audio negotiation on FreeRDP 3 to
+	 * avoid advertising a capability we cannot service. */
+	{
+		static bool warned;
+		if (!warned) {
+			weston_log("RDP audio playback/capture disabled: FreeRDP 3.x port pending\n");
+			warned = true;
+		}
+	}
+	settings->AudioPlayback = FALSE;
+	settings->AudioCapture = FALSE;
+#else
 	settings->AudioPlayback = b->audio_out_setup && b->audio_out_teardown;
 	settings->AudioCapture = b->audio_in_setup && b->audio_in_teardown;
+#endif
 
 	if (settings->RemoteApplicationMode ||
 		settings->RedirectClipboard ||
@@ -1582,7 +1610,11 @@ xf_input_synchronize_event(rdpInput *input, UINT32 flags)
 }
 
 static BOOL
+#if FREERDP_VERSION_MAJOR >= 3
+xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT8 code)
+#else
 xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
+#endif
 {
 	uint32_t scan_code, vk_code, full_code, keyboard_locale;
 	enum wl_keyboard_key_state keyState;
@@ -1599,11 +1631,16 @@ xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
 	if (!(peerContext->item.flags & RDP_PEER_ACTIVATED))
 		return TRUE;
 
-	if (flags & KBD_FLAGS_DOWN) {
-		keyState = WL_KEYBOARD_KEY_STATE_PRESSED;
-		notify = 1;
-	} else if (flags & KBD_FLAGS_RELEASE) {
+	if (flags & KBD_FLAGS_RELEASE) {
 		keyState = WL_KEYBOARD_KEY_STATE_RELEASED;
+		notify = 1;
+	} else {
+#if FREERDP_VERSION_MAJOR < 3
+		/* KBD_FLAGS_DOWN was removed in FreeRDP 3 — absence of RELEASE
+		 * implicitly means key-down. Keep the old assertion for FreeRDP 2. */
+		assert(flags & KBD_FLAGS_DOWN);
+#endif
+		keyState = WL_KEYBOARD_KEY_STATE_PRESSED;
 		notify = 1;
 	}
 
@@ -1653,7 +1690,11 @@ xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
 			if (flags & KBD_FLAGS_EXTENDED)
 				vk_code |= KBDEXT;
 
+#if FREERDP_VERSION_MAJOR >= 3
+		scan_code = GetKeycodeFromVirtualKeyCode(vk_code, WINPR_KEYCODE_TYPE_XKB);
+#else
 		scan_code = GetKeycodeFromVirtualKeyCode(vk_code, KEYCODE_TYPE_EVDEV);
+#endif
 		/*weston_log("code=%x ext=%d vk_code=%x scan_code=%x\n", code, (flags & KBD_FLAGS_EXTENDED) ? 1 : 0,
 				vk_code, scan_code);*/
 
@@ -1822,6 +1863,36 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 
 	settings = client->context->settings;
 	/* configure security settings */
+#if FREERDP_VERSION_MAJOR >= 3
+	/* The legacy "rdp4" key path is gone in FreeRDP 3.x; only TLS is supported. */
+	if (is_tls_enabled(b)) {
+		if (using_session_tls(b)) {
+			rdpPrivateKey *key = freerdp_key_new_from_pem(b->server_key_content);
+			rdpCertificate *cert = freerdp_certificate_new_from_pem(b->server_cert_content);
+			if (!key || !cert) {
+				rdp_debug_error(b, "failed to construct PEM cert/key for RDP TLS\n");
+				goto error_initialize;
+			}
+			if (!freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerRsaKey, key, 1) ||
+			    !freerdp_settings_set_pointer_len(settings, FreeRDP_RdpServerCertificate, cert, 1)) {
+				rdp_debug_error(b, "failed to apply RDP server PEM cert/key\n");
+				goto error_initialize;
+			}
+		} else {
+			/* WSLg in production uses the session-generated TLS path via Hyper-V
+			 * vsock (CertificateContent + PrivateKeyContent from the host). The
+			 * file-cert path used to be supported via settings->{Certificate,PrivateKey}File
+			 * but those fields were removed in FreeRDP 3.x. Loading from disk and
+			 * calling freerdp_{key,certificate}_new_from_pem() is left for a follow-up
+			 * once a real consumer for the file-cert path exists. */
+			rdp_debug_error(b, "FreeRDP 3.x file-based cert/key path is not yet implemented; use session-generated TLS or run against FreeRDP 2.x\n");
+			goto error_initialize;
+		}
+	} else {
+		freerdp_settings_set_bool(settings, FreeRDP_TlsSecurity, FALSE);
+	}
+	freerdp_settings_set_bool(settings, FreeRDP_NlaSecurity, FALSE);
+#else
 	if (b->rdp_key)
 		settings->RdpKeyFile = strdup(b->rdp_key);
 	if (is_tls_enabled(b)) {
@@ -1836,6 +1907,7 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 		settings->TlsSecurity = FALSE;
 	}
 	settings->NlaSecurity = FALSE;
+#endif
 
 	if (!client->Initialize(client)) {
 		rdp_debug_error(b, "peer initialization failed\n");
@@ -1862,6 +1934,7 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 	settings->RedirectClipboard = TRUE;
 	settings->HasExtendedMouseEvent = TRUE;
 	settings->HasHorizontalWheel = TRUE;
+	settings->FastPathInput = TRUE;
 
 	client->Capabilities = xf_peer_capabilities;
 	client->PostConnect = xf_peer_post_connect;
