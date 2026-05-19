@@ -1936,6 +1936,30 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 	settings->HasHorizontalWheel = TRUE;
 	settings->FastPathInput = TRUE;
 
+	/* FreeRDP 3.x added a connect-time NetworkAutoDetect step to the server
+	 * state machine that did not exist in 2.x: SECURE_SETTINGS_EXCHANGE ->
+	 * CONNECT_TIME_AUTO_DETECT_REQUEST -> CONNECT_TIME_AUTO_DETECT_RESPONSE
+	 * -> LICENSING. Leaving the 3.x default (TRUE) causes the server to send
+	 * AUTODETECT_REQ and wait for a response that WSLg's rdp-backend never
+	 * services (we don't register autodetect callbacks). WSLg always runs
+	 * over a local Hyper-V vsock, so bandwidth/RTT autodetect has no value
+	 * here. Force FALSE so the state machine skips straight to LICENSING,
+	 * matching the FreeRDP 2.x behavior we relied on. No-op on 2.x (which
+	 * ignored the setting at connect-time anyway). */
+	settings->NetworkAutoDetect = FALSE;
+
+	/* Likewise FreeRDP 3.x server unconditionally walks an extra
+	 * MULTITRANSPORT bootstrap step (LICENSING ->
+	 * MULTITRANSPORT_BOOTSTRAPPING_REQUEST -> CAPABILITIES_EXCHANGE) that did
+	 * not exist on the 2.x server. When SupportMultitransport+UDPFECR are
+	 * both set (3.x defaults) the server sends a SEC_TRANSPORT_REQ on the
+	 * message channel right after the license PDU. UDP multitransport carries
+	 * no benefit on WSLg's TCP-only vsock/loopback transport, so disable it:
+	 * the server then transitions straight to CAPABILITIES_EXCHANGE without
+	 * emitting a transport request. No-op on 2.x. */
+	settings->SupportMultitransport = FALSE;
+	settings->MultitransportFlags = 0;
+
 	client->Capabilities = xf_peer_capabilities;
 	client->PostConnect = xf_peer_post_connect;
 	client->Activate = xf_peer_activate;
