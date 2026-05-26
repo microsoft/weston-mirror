@@ -41,6 +41,8 @@
 #include <libweston/libweston.h>
 #include <shared/xalloc.h>
 
+#include <freerdp/version.h>
+
 static AUDIO_FORMAT rdp_audio_supported_audio_formats[] = {
 		{ WAVE_FORMAT_PCM, 2, 44100, 176400, 4, 16, 0, NULL },
 	};
@@ -656,8 +658,11 @@ rdp_audio_client_activated(RdpsndServerContext* context)
 		rdp_audio_debug(priv, "rdp_audio_server_activated: bytesPerFrame:%d, latency:%d\n", 
 				priv->bytesPerFrame, context->latency);
 
-		context->SelectFormat(context, format);
-		context->SetVolume(context, 0x7FFF, 0x7FFF);
+		if (context->SelectFormat(context, format) != CHANNEL_RC_OK) {
+			weston_log("RDPAudio - SelectFormat failed; audio output disabled.\n");
+			return;
+		}
+		(void)context->SetVolume(context, 0x7FFF, 0x7FFF);
 
 		priv->pulseAudioSinkListenerFd = rdp_audio_setup_listener();
 		if (priv->pulseAudioSinkListenerFd < 0) {
@@ -706,7 +711,7 @@ rdp_audio_out_init(struct weston_compositor *c, HANDLE vcm)
 		goto Error_Exit;
 	}
 	memcpy(audio_formats, rdp_audio_supported_audio_formats, sizeof rdp_audio_supported_audio_formats);
-    
+
 	priv->rdpsnd_server_context->data = (void*)priv;
 	priv->rdpsnd_server_context->Activated = rdp_audio_client_activated;
 	priv->rdpsnd_server_context->ConfirmBlock = rdp_audio_client_confirm_block;
@@ -722,6 +727,8 @@ rdp_audio_out_init(struct weston_compositor *c, HANDLE vcm)
 			weston_log("RDPAudio - force static channel.\n");
 		}
 	}
+#else
+	(void)s;
 #endif // HAVE_RDPAUDIO_DYNAMIC_VIRTUAL_CHANNEL
 
 	/* Calling Initialize does Start as well */
@@ -784,8 +791,8 @@ rdp_audio_out_destroy(void *audio_out_private)
 		assert(priv->pulseAudioSinkFd < 0);
 		assert(priv->audioBuffer == NULL);
 
-		priv->rdpsnd_server_context->Close(priv->rdpsnd_server_context);
-		priv->rdpsnd_server_context->Stop(priv->rdpsnd_server_context);
+		(void)priv->rdpsnd_server_context->Close(priv->rdpsnd_server_context);
+		(void)priv->rdpsnd_server_context->Stop(priv->rdpsnd_server_context);
 
 		if (priv->audioSem != -1) {
 			close(priv->audioSem);

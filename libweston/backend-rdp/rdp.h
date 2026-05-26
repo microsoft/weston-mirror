@@ -144,7 +144,7 @@ struct rdp_backend {
 	struct weston_surface *proxy_surface;
 
 #ifdef HAVE_FREERDP_RDPAPPLIST_H
-	/* import from libfreerdp-server2.so */
+	/* import from librdpapplist-server.so (built from wslg/rdpapplist/) */
 	RdpAppListServerContext *(*rdpapplist_server_context_new)(HANDLE vcm);
 	void (*rdpapplist_server_context_free)(RdpAppListServerContext* context);
 
@@ -153,7 +153,7 @@ struct rdp_backend {
 #endif // HAVE_FREERDP_RDPAPPLIST_H
 
 #ifdef HAVE_FREERDP_GFXREDIR_H
-	/* import from libfreerdp-server2.so */
+	/* import from libfreerdp-server{2,3}.so */
 	GfxRedirServerContext *(*gfxredir_server_context_new)(HANDLE vcm);
 	void (*gfxredir_server_context_free)(GfxRedirServerContext* context);
 

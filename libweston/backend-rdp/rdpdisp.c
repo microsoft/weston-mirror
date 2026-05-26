@@ -226,8 +226,8 @@ disp_start_monitor_layout_change(freerdp_peer *client, rdpMonitor *config, UINT3
 		/* accumulate monitor layout */
 		if (config[i].is_primary) {
 			/* it looks settings's desktopWidth/Height only represents primary */
-			settings->DesktopWidth = config[i].width;
-			settings->DesktopHeight = config[i].height;
+			(void)freerdp_settings_set_uint32(settings, FreeRDP_DesktopWidth, config[i].width);
+			(void)freerdp_settings_set_uint32(settings, FreeRDP_DesktopHeight, config[i].height);
 		}
 		pixman_region32_union_rect(&desktop, &desktop,
 					   config[i].x,
