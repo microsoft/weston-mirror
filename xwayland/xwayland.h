@@ -84,11 +84,13 @@ struct weston_wm {
 	xcb_get_property_reply_t *property_reply;
 	int property_start;
 	struct wl_array source_data;
+	int source_data_offset;
 	xcb_selection_request_event_t selection_request;
 	xcb_atom_t selection_target;
 	xcb_timestamp_t selection_timestamp;
 	int selection_property_set;
 	int flush_property_on_delete;
+	int convert_bmp_to_png;
 	struct wl_listener selection_listener;
 	struct wl_listener seat_create_listener;
 	struct wl_listener seat_destroy_listener;
@@ -152,6 +154,10 @@ struct weston_wm {
 		xcb_atom_t		 window;
 		xcb_atom_t		 text_plain_utf8;
 		xcb_atom_t		 text_plain;
+		xcb_atom_t		 image_bmp;
+		xcb_atom_t		 image_png;
+		xcb_atom_t		 text_rtf;
+		xcb_atom_t		 text_html;
 		xcb_atom_t		 xdnd_selection;
 		xcb_atom_t		 xdnd_aware;
 		xcb_atom_t		 xdnd_enter;
