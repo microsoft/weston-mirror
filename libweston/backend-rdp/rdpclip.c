@@ -36,6 +36,7 @@
 #include <stdio.h>
 
 #include "rdp.h"
+#include "rdpclip-fd.h"
 
 #include "libweston-internal.h"
 
@@ -105,7 +106,6 @@ enum rdp_clipboard_data_source_state {
 	RDP_CLIPBOARD_SOURCE_TRANSFERRED, /* completed transfering data to consumer */
 	RDP_CLIPBOARD_SOURCE_CANCEL_PENDING, /* data transfer cancel requested */
 	RDP_CLIPBOARD_SOURCE_CANCELED, /* data transfer canceled */
-	RDP_CLIPBOARD_SOURCE_RETRY, /* retry later */
 	RDP_CLIPBOARD_SOURCE_FAILED, /* failure occured */
 };
 
@@ -162,8 +162,6 @@ clipboard_data_source_state_to_string(struct rdp_clipboard_data_source *source)
 		return "cancel pending";
 	case RDP_CLIPBOARD_SOURCE_CANCELED:
 		return "canceled";
-	case RDP_CLIPBOARD_SOURCE_RETRY:
-		return "retry";
 	case RDP_CLIPBOARD_SOURCE_FAILED:
 		return "failed";
 	}
@@ -1108,9 +1106,11 @@ clipboard_data_source_send(struct weston_data_source *base,
 			   clipboard_data_source_state_to_string(ctx->clipboard_inflight_client_data_source),
 			   ctx->clipboard_inflight_client_data_source->data_source_fd);
 		if (source == ctx->clipboard_inflight_client_data_source) {
-			/* when new source and previous source is same, update fd with new one and retry */
-			source->state = RDP_CLIPBOARD_SOURCE_RETRY;
-			ctx->clipboard_inflight_client_data_source->data_source_fd = fd;
+			/* Keep the active transfer intact. The requester may retry
+			 * after receiving EOF on the new fd. */
+			assert(source->data_source_fd != -1);
+			source->data_source_fd =
+				rdp_clipboard_take_fd(source->data_source_fd, fd);
 			return;
 		} else {
 			source->state = RDP_CLIPBOARD_SOURCE_FAILED;
@@ -1130,7 +1130,9 @@ clipboard_data_source_send(struct weston_data_source *base,
 	    source->client_format_id_table[index]) {	/* check supported by current data source from client */
 		ctx->clipboard_inflight_client_data_source = source;
 		source->refcount++; /* reference while request inflight. */
-		source->data_source_fd = fd;
+		assert(source->data_source_fd == -1);
+		source->data_source_fd =
+			rdp_clipboard_take_fd(source->data_source_fd, fd);
 		assert(source->inflight_write_count == 0);
 		assert(source->inflight_data_to_write == NULL);
 		assert(source->inflight_data_size == 0);
