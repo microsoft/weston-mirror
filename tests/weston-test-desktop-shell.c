@@ -44,6 +44,7 @@
 struct desktest_shell {
 	struct wl_listener compositor_destroy_listener;
 	struct weston_desktop *desktop;
+	struct text_backend *text_backend;
 	struct weston_layer background_layer;
 	struct weston_surface *background_surface;
 	struct weston_view *background_view;
@@ -165,6 +166,9 @@ shell_destroy(struct wl_listener *listener, void *data)
 	dts = container_of(listener, struct desktest_shell,
 			   compositor_destroy_listener);
 
+	wl_list_remove(&dts->compositor_destroy_listener.link);
+	if (dts->text_backend)
+		text_backend_destroy(dts->text_backend);
 	weston_desktop_destroy(dts->desktop);
 	weston_view_destroy(dts->background_view);
 	weston_surface_destroy(dts->background_surface);
@@ -176,6 +180,8 @@ wet_shell_init(struct weston_compositor *ec,
 	       int *argc, char *argv[])
 {
 	struct desktest_shell *dts;
+	struct weston_config_section *section;
+	bool enable_text_backend = false;
 
 	dts = zalloc(sizeof *dts);
 	if (!dts)
@@ -219,7 +225,20 @@ wet_shell_init(struct weston_compositor *ec,
 	if (dts->desktop == NULL)
 		goto out_view;
 
+	section = weston_config_get_section(wet_get_config(ec),
+					    "test-shell", NULL, NULL);
+	weston_config_section_get_bool(section, "text-backend",
+				       &enable_text_backend, false);
+	if (enable_text_backend) {
+		dts->text_backend = text_backend_init(ec);
+		if (!dts->text_backend)
+			goto out_desktop;
+	}
+
 	return 0;
+
+out_desktop:
+	weston_desktop_destroy(dts->desktop);
 
 out_view:
 	weston_view_destroy(dts->background_view);

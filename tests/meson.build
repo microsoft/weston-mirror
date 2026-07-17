@@ -2,7 +2,11 @@ plugin_test_shell_desktop = shared_library(
 	'weston-test-desktop-shell',
 	'weston-test-desktop-shell.c',
 	include_directories: common_inc,
-	dependencies: [ dep_lib_desktop, dep_libweston_public ],
+	dependencies: [
+		dep_lib_desktop,
+		dep_libexec_weston,
+		dep_libweston_public,
+	],
 	name_prefix: '',
 	install: false
 )
@@ -116,6 +120,28 @@ dep_zucmain = declare_dependency(
 	dependencies: dep_zuc
 )
 
+exe_text_input_method_test = executable(
+	'text-input-method-test',
+	[
+		'text-input-method-test.c',
+		input_method_unstable_v1_client_protocol_h,
+		input_method_unstable_v1_protocol_c,
+	],
+	include_directories: common_inc,
+	dependencies: dep_wayland_client,
+	install: false,
+)
+
+text_test_config = configuration_data()
+text_test_config.set(
+	'TEST_INPUT_METHOD_PATH', exe_text_input_method_test.full_path()
+)
+configure_file(
+	input: 'text-test.ini.in',
+	output: 'text-test.ini',
+	configuration: text_test_config,
+)
+
 tests = [
 	{	'name': 'bad-buffer', },
 	{	'name': 'drm-smoke', },
@@ -171,7 +197,10 @@ tests = [
 			'text-test.c',
 			text_input_unstable_v1_client_protocol_h,
 			text_input_unstable_v1_protocol_c,
+			text_input_unstable_v3_client_protocol_h,
+			text_input_unstable_v3_protocol_c,
 		],
+		'test_deps': [ exe_text_input_method_test ],
 	},
 	{
 		'name': 'touch',
@@ -268,6 +297,10 @@ test_config_h.set_quoted('WESTON_DATA_DIR', join_paths(meson.current_source_dir(
 test_config_h.set_quoted('TESTSUITE_PLUGIN_PATH', exe_plugin_test.full_path())
 test_config_h.set_quoted('TESTSUITE_IVI_CONFIG_PATH', join_paths(meson.current_build_dir(), '../ivi-shell/weston-ivi-test.ini'))
 test_config_h.set_quoted('TESTSUITE_INTERNAL_SCREENSHOT_CONFIG_PATH', join_paths(meson.current_source_dir(), 'internal-screenshot.ini'))
+test_config_h.set_quoted(
+	'TESTSUITE_TEXT_CONFIG_PATH',
+	join_paths(meson.current_build_dir(), 'text-test.ini')
+)
 configure_file(output: 'test-config.h', configuration: test_config_h)
 
 foreach t : tests
