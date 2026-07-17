@@ -59,7 +59,9 @@ enum shell_type {
 	/** The ivi-shell. */
 	SHELL_IVI,
 	/** The fullscreen-shell. */
-	SHELL_FULLSCREEN
+	SHELL_FULLSCREEN,
+	/** The RDP remote application shell. */
+	SHELL_RDPRAIL
 };
 
 /** Weston compositor configuration

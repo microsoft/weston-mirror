@@ -217,6 +217,9 @@ renderer_to_arg(enum weston_compositor_backend b, enum renderer_type r)
 	case WESTON_BACKEND_HEADLESS:
 		assert(r >= RENDERER_NOOP && r <= RENDERER_GL);
 		return headless_names[r];
+	case WESTON_BACKEND_RDP:
+		assert(r == RENDERER_NOOP);
+		return NULL;
 	case WESTON_BACKEND_DRM:
 		assert(r >= RENDERER_PIXMAN && r <= RENDERER_GL);
 		return drm_names[r];
@@ -235,6 +238,7 @@ shell_to_str(enum shell_type t)
 		[SHELL_DESKTOP] = "desktop-shell.so",
 		[SHELL_FULLSCREEN] = "fullscreen-shell.so",
 		[SHELL_IVI] = "ivi-shell.so",
+		[SHELL_RDPRAIL] = "rdprail-shell.so",
 	};
 	assert(t >= 0 && t < ARRAY_LENGTH(names));
 	return names[t];

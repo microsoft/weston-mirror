@@ -548,9 +548,22 @@ test_handle_capture_screenshot_done(void *data, struct weston_test *weston_test)
 	test->buffer_copy_done = 1;
 }
 
+static void
+test_handle_surface_state(void *data, struct weston_test *weston_test,
+			  uint32_t mapped, wl_fixed_t x, wl_fixed_t y)
+{
+	struct test *test = data;
+
+	test->surface_state_received = true;
+	test->surface_mapped = mapped;
+	test->surface_x = x;
+	test->surface_y = y;
+}
+
 static const struct weston_test_listener test_listener = {
 	test_handle_pointer_position,
 	test_handle_capture_screenshot_done,
+	test_handle_surface_state,
 };
 
 static void
@@ -1635,6 +1648,22 @@ capture_screenshot_of_output(struct client *client)
 	 */
 
 	return buffer;
+}
+
+struct weston_test_surface_state
+get_surface_state(struct client *client, struct wl_surface *surface)
+{
+	struct weston_test_surface_state state;
+
+	client->test->surface_state_received = false;
+	weston_test_get_surface_state(client->test->weston_test, surface);
+	client_roundtrip(client);
+	assert(client->test->surface_state_received);
+
+	state.mapped = client->test->surface_mapped;
+	state.x = client->test->surface_x;
+	state.y = client->test->surface_y;
+	return state;
 }
 
 static void
