@@ -599,6 +599,76 @@ send_touch(struct wl_client *client, struct wl_resource *resource,
 		     wl_fixed_to_double(y), touch_type);
 }
 
+static void
+destroy_output(struct wl_client *client, struct wl_resource *resource,
+	       struct wl_resource *output_resource)
+{
+	struct weston_head *head = weston_head_from_resource(output_resource);
+
+	if (!head || !head->output) {
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_OBJECT,
+				       "output is unavailable");
+		return;
+	}
+
+	weston_output_destroy(head->output);
+
+	(void)client;
+}
+
+static void
+set_output_mode(struct wl_client *client, struct wl_resource *resource,
+		struct wl_resource *output_resource, int32_t width, int32_t height)
+{
+	struct weston_head *head = weston_head_from_resource(output_resource);
+	struct weston_mode *mode;
+
+	if (!head || !head->output || width <= 0 || height <= 0) {
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_OBJECT,
+				       "invalid output mode");
+		return;
+	}
+
+	mode = zalloc(sizeof *mode);
+	if (!mode) {
+		wl_resource_post_no_memory(resource);
+		return;
+	}
+	mode->width = width;
+	mode->height = height;
+	if (weston_output_mode_set_native(head->output, mode, 1) < 0) {
+		free(mode);
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_OBJECT,
+				       "failed to set output mode");
+	}
+
+	(void)client;
+}
+
+static void
+get_surface_state(struct wl_client *client, struct wl_resource *resource,
+		  struct wl_resource *surface_resource)
+{
+	struct weston_surface *surface =
+		wl_resource_get_user_data(surface_resource);
+	struct weston_view *view;
+	float x = 0.0f, y = 0.0f;
+
+	if (!wl_list_empty(&surface->views))
+		view = container_of(surface->views.next, struct weston_view,
+				    surface_link);
+	else
+		view = NULL;
+	if (view)
+		weston_view_to_global_float(view, 0.0f, 0.0f, &x, &y);
+
+	weston_test_send_surface_state(resource,
+				       weston_surface_is_mapped(surface),
+				       wl_fixed_from_double(x), wl_fixed_from_double(y));
+
+	(void)client;
+}
+
 static const struct weston_test_interface test_implementation = {
 	move_surface,
 	move_pointer,
@@ -610,6 +680,9 @@ static const struct weston_test_interface test_implementation = {
 	device_add,
 	capture_screenshot,
 	send_touch,
+	destroy_output,
+	set_output_mode,
+	get_surface_state,
 };
 
 static void

@@ -565,6 +565,12 @@ request. Currently, this option is supported by kiosk-shell.
 .BI "path=" "@weston_libexecdir@/weston-keyboard"
 sets the path of the on screen keyboard input method (string).
 .RE
+.TP 7
+.BI "allow-external=" false
+Allows the first external client to bind the privileged input method protocol.
+This should only be enabled when the compositor does not launch the input
+method itself and the clients connected to the compositor are trusted.
+.RE
 .RE
 .SH "KEYBOARD SECTION"
 This section contains the following keys:

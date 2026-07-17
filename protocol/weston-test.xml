@@ -105,6 +105,22 @@
       <arg name="y" type="fixed"/>
       <arg name="touch_type" type="uint"/>
     </request>
+    <request name="destroy_output">
+      <arg name="output" type="object" interface="wl_output"/>
+    </request>
+    <request name="set_output_mode">
+      <arg name="output" type="object" interface="wl_output"/>
+      <arg name="width" type="int"/>
+      <arg name="height" type="int"/>
+    </request>
+    <request name="get_surface_state">
+      <arg name="surface" type="object" interface="wl_surface"/>
+    </request>
+    <event name="surface_state">
+      <arg name="mapped" type="uint"/>
+      <arg name="x" type="fixed"/>
+      <arg name="y" type="fixed"/>
+    </event>
   </interface>
 
   <interface name="weston_test_runner" version="1">

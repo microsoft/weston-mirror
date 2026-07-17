@@ -104,6 +104,7 @@ struct text_backend {
 	struct {
 		char *path;
 		struct wl_client *client;
+		bool allow_external;
 
 		unsigned deathcount;
 		struct timespec deathstamp;
@@ -874,7 +875,8 @@ bind_input_method(struct wl_client *client,
 		return;
 	}
 
-	if (text_backend->input_method.client != client) {
+	if (!text_backend->input_method.allow_external &&
+	    text_backend->input_method.client != client) {
 		wl_resource_post_error(resource,
 				       WL_DISPLAY_ERROR_INVALID_OBJECT,
 				       "permission to bind "
@@ -1053,6 +1055,9 @@ text_backend_configuration(struct text_backend *text_backend)
 	weston_config_section_get_string(section, "path",
 					 &text_backend->input_method.path,
 					 client);
+	weston_config_section_get_bool(
+		section, "allow-external",
+		&text_backend->input_method.allow_external, false);
 	free(client);
 }
 

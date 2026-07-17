@@ -80,8 +80,11 @@ struct desktop_shell {
 	struct wl_listener transform_listener;
 	struct wl_listener destroy_listener;
 	struct wl_listener show_input_panel_listener;
+	struct wl_listener hide_input_panel_listener;
+	struct wl_listener update_input_panel_listener;
 
 	struct weston_layer fullscreen_layer;
+	struct weston_layer input_panel_layer;
 
 	struct wl_listener pointer_focus_listener;
 	struct weston_surface *grab_surface;
@@ -101,6 +104,7 @@ struct desktop_shell {
 
 	struct {
 		struct weston_surface *surface;
+		struct wl_listener surface_destroy_listener;
 		pixman_box32_t cursor_rectangle;
 	} text_input;
 
@@ -114,7 +118,9 @@ struct desktop_shell {
 
 	struct {
 		struct wl_resource *binding;
+		struct wl_list surfaces;
 	} input_panel;
+	bool showing_input_panels;
 
 	bool allow_zap;
 	bool allow_alt_f4_to_close_app;

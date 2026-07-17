@@ -194,6 +194,16 @@ struct weston_rdprail_api {
 	/** Notify window proxy surface
 	 */
 	void (*notify_window_proxy_surface)(struct weston_surface *proxy_surface);
+
+	/** Set the RAIL owner of a surface.
+	 */
+	void (*set_window_owner)(struct weston_surface *surface,
+				 struct weston_surface *owner);
+
+	/** Update the RAIL visibility of a surface.
+	 */
+	void (*set_window_visible)(struct weston_surface *surface,
+				   bool visible);
 };
 
 static inline const struct weston_rdprail_api *
@@ -263,6 +273,10 @@ struct weston_surface_rail_state {
 
 	/* rdpgfx surface */
 	uint32_t surface_id;
+
+	struct weston_surface *surface;
+	struct wl_listener parent_destroy_listener;
+	bool has_requested_visibility;
 };
 
 #define WESTON_RDP_BACKEND_CONFIG_VERSION 3

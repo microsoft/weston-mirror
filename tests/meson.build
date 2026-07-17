@@ -71,6 +71,24 @@ exe_plugin_test = shared_library(
 	install: false,
 )
 
+if get_option('backend-rdp') and get_option('shell-rdprail')
+	plugin_rdprail_test = shared_library(
+		'rdprail-test',
+		[
+			'rdprail-test.c',
+			weston_rdprail_test_server_protocol_h,
+			weston_rdprail_test_protocol_c,
+		],
+		include_directories: common_inc,
+		dependencies: [
+			dep_frdp,
+			dep_libweston_private,
+		],
+		name_prefix: '',
+		install: false,
+	)
+endif
+
 deps_zuc = [ dep_libshared ]
 if get_option('test-junit-xml')
 	d = dependency('libxml-2.0', version: '>= 2.6', required: false)
@@ -122,6 +140,14 @@ tests = [
 	{	'name': 'buffer-transforms', },
 	{	'name': 'devices', },
 	{	'name': 'event', },
+	{
+		'name': 'input-method-bind',
+		'sources': [
+			'input-method-bind-test.c',
+			input_method_unstable_v1_client_protocol_h,
+			input_method_unstable_v1_protocol_c,
+		],
+	},
 	{	'name': 'internal-screenshot', },
 	{
 		'name': 'keyboard',
@@ -190,6 +216,23 @@ tests = [
 	{	'name': 'viewporter-shot', },
 ]
 
+if get_option('backend-rdp') and get_option('shell-rdprail')
+	tests += {
+		'name': 'rdprail-input-panel',
+		'sources': [
+			'rdprail-input-panel-test.c',
+			input_method_unstable_v1_client_protocol_h,
+			input_method_unstable_v1_protocol_c,
+			text_input_unstable_v1_client_protocol_h,
+			text_input_unstable_v1_protocol_c,
+			weston_rdprail_test_client_protocol_h,
+			weston_rdprail_test_protocol_c,
+		],
+		'dep_objs': dep_frdp,
+		'test_deps': [ plugin_rdprail_test ],
+	}
+endif
+
 tests_standalone = [
 	['config-parser', [], [ dep_zucmain ]],
 	['matrix', [], [ dep_libm, dep_matrix_c ]],
@@ -202,6 +245,18 @@ tests_standalone = [
 		[ dep_zucmain ]
 	],
 ]
+
+if get_option('backend-rdp')
+	tests_standalone += [
+		[
+			'rdprail-window-state',
+			[
+				'../libweston/backend-rdp/rdprail-window-state.c',
+			],
+			[ dep_zucmain, dep_frdp, dep_libweston_public ],
+		],
+	]
+endif
 
 if get_option('xwayland')
 	d = dependency('x11', required: false)
@@ -268,6 +323,24 @@ test_config_h.set_quoted('WESTON_DATA_DIR', join_paths(meson.current_source_dir(
 test_config_h.set_quoted('TESTSUITE_PLUGIN_PATH', exe_plugin_test.full_path())
 test_config_h.set_quoted('TESTSUITE_IVI_CONFIG_PATH', join_paths(meson.current_build_dir(), '../ivi-shell/weston-ivi-test.ini'))
 test_config_h.set_quoted('TESTSUITE_INTERNAL_SCREENSHOT_CONFIG_PATH', join_paths(meson.current_source_dir(), 'internal-screenshot.ini'))
+if get_option('backend-rdp') and get_option('shell-rdprail')
+	test_config_h.set_quoted(
+		'TESTSUITE_RDPRAIL_INPUT_PANEL_CONFIG_PATH',
+		join_paths(meson.current_source_dir(), 'rdprail-input-panel.ini')
+	)
+	test_config_h.set_quoted(
+		'TESTSUITE_RDPRAIL_TEST_PLUGIN_PATH',
+		plugin_rdprail_test.full_path()
+	)
+endif
+test_config_h.set_quoted(
+	'TESTSUITE_INPUT_METHOD_DENY_CONFIG_PATH',
+	join_paths(meson.current_source_dir(), 'input-method-external-deny.ini')
+)
+test_config_h.set_quoted(
+	'TESTSUITE_INPUT_METHOD_ALLOW_CONFIG_PATH',
+	join_paths(meson.current_source_dir(), 'input-method-external-allow.ini')
+)
 configure_file(output: 'test-config.h', configuration: test_config_h)
 
 foreach t : tests

@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="weston_rdprail_test">
+
+  <copyright>
+    Copyright 2026 Microsoft Corporation
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice (including the next
+    paragraph) shall be included in all copies or substantial portions of the
+    Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <interface name="weston_rdprail_test" version="1">
+    <description summary="RDPRAIL internal testing">
+      Test-only access to RDPRAIL behavior. This interface is implemented by
+      an uninstalled test module and must not be used outside the test suite.
+    </description>
+    <request name="get_window_state">
+      <arg name="surface" type="object" interface="wl_surface"/>
+      <arg name="owner" type="object" interface="wl_surface"
+           allow-null="true"/>
+    </request>
+    <event name="window_state">
+      <arg name="owner_matches" type="uint"/>
+      <arg name="show_state_requested" type="uint"/>
+    </event>
+  </interface>
+
+</protocol>

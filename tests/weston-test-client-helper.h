@@ -74,6 +74,10 @@ struct test {
 	int pointer_y;
 	uint32_t n_egl_buffers;
 	int buffer_copy_done;
+	bool surface_state_received;
+	bool surface_mapped;
+	wl_fixed_t surface_x;
+	wl_fixed_t surface_y;
 };
 
 struct input {
@@ -184,6 +188,12 @@ struct range {
 	int b;
 };
 
+struct weston_test_surface_state {
+	bool mapped;
+	wl_fixed_t x;
+	wl_fixed_t y;
+};
+
 struct client *
 create_client(void);
 
@@ -257,6 +267,9 @@ load_image_from_png(const char *fname);
 
 struct buffer *
 capture_screenshot_of_output(struct client *client);
+
+struct weston_test_surface_state
+get_surface_state(struct client *client, struct wl_surface *surface);
 
 bool
 verify_screen_content(struct client *client,
