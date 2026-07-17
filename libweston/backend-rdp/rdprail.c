@@ -43,6 +43,7 @@
 #include <strings.h>
 
 #include "rdp.h"
+#include "rdprail-window-state.h"
 
 #include "libweston-internal.h"
 #include "shared/xalloc.h"
@@ -1482,6 +1483,127 @@ rdp_showstate_to_string(uint32_t showstate)
 	}
 }
 
+static uint32_t
+rdp_rail_window_owner_id(struct weston_surface_rail_state *rail_state)
+{
+	struct weston_surface_rail_state *parent_rail_state;
+
+	if (!rail_state->parent_surface ||
+	    !rail_state->parent_surface->backend_state)
+		return RDP_RAIL_DESKTOP_WINDOW_ID;
+
+	parent_rail_state = rail_state->parent_surface->backend_state;
+	if (!parent_rail_state->window_id)
+		return RDP_RAIL_DESKTOP_WINDOW_ID;
+
+	return parent_rail_state->window_id;
+}
+
+static void
+rdp_rail_update_window_state(struct weston_surface *surface)
+{
+	struct weston_surface_rail_state *rail_state = surface->backend_state;
+	struct rdp_backend *b = to_rdp_backend(surface->compositor);
+	WINDOW_ORDER_INFO window_order_info = {};
+	WINDOW_STATE_ORDER window_state_order = {};
+	uint32_t state_fields;
+	uint32_t owner_window_id;
+	rdpUpdate *update;
+
+	if (!rail_state || !rail_state->window_id || rail_state->isCursor ||
+	    !b || !b->rdp_peer || !b->rdp_peer->context)
+		return;
+
+	owner_window_id = rdp_rail_window_owner_id(rail_state);
+	window_order_info.windowId = rail_state->window_id;
+	window_order_info.fieldFlags = WINDOW_ORDER_TYPE_WINDOW;
+	state_fields = rdp_rail_prepare_window_state_order(
+		rail_state->parent_window_id, owner_window_id,
+		rail_state->showState, rail_state->showState_requested,
+		&window_order_info, &window_state_order);
+
+	if (state_fields & WINDOW_ORDER_FIELD_OWNER)
+		rail_state->parent_window_id = owner_window_id;
+	if (state_fields & WINDOW_ORDER_FIELD_SHOW)
+		rail_state->showState = rail_state->showState_requested;
+
+	if (!state_fields)
+		return;
+
+	update = b->rdp_peer->context->update;
+	rdp_rail_send_window_state_order(update, &window_order_info,
+					 &window_state_order);
+}
+
+static void
+rdp_rail_handle_parent_destroy(struct wl_listener *listener, void *data)
+{
+	struct weston_surface_rail_state *rail_state =
+		container_of(listener, struct weston_surface_rail_state,
+			     parent_destroy_listener);
+
+	rail_state->parent_surface = NULL;
+	rail_state->parent_destroy_listener.notify = NULL;
+	rdp_rail_update_window_state(rail_state->surface);
+
+	(void)data;
+}
+
+static struct weston_surface_rail_state *
+rdp_rail_get_window_state(struct weston_surface *surface)
+{
+	struct weston_surface_rail_state *rail_state = surface->backend_state;
+
+	if (rail_state)
+		return rail_state;
+
+	rail_state = xzalloc(sizeof *rail_state);
+	rail_state->surface = surface;
+	rail_state->destroy_listener.notify = rdp_rail_destroy_window;
+	wl_signal_add(&surface->destroy_signal, &rail_state->destroy_listener);
+	surface->backend_state = rail_state;
+
+	return rail_state;
+}
+
+static void
+rdp_rail_set_window_owner(struct weston_surface *surface,
+			  struct weston_surface *owner)
+{
+	struct weston_surface_rail_state *rail_state;
+
+	rail_state = rdp_rail_get_window_state(surface);
+	if (rail_state->parent_surface == owner)
+		return;
+
+	if (rail_state->parent_destroy_listener.notify) {
+		wl_list_remove(&rail_state->parent_destroy_listener.link);
+		rail_state->parent_destroy_listener.notify = NULL;
+	}
+
+	rail_state->parent_surface = owner;
+	if (owner) {
+		rail_state->parent_destroy_listener.notify =
+			rdp_rail_handle_parent_destroy;
+		wl_signal_add(&owner->destroy_signal,
+			      &rail_state->parent_destroy_listener);
+	}
+
+	rdp_rail_update_window_state(surface);
+}
+
+static void
+rdp_rail_set_window_visible(struct weston_surface *surface, bool visible)
+{
+	struct weston_surface_rail_state *rail_state;
+
+	rail_state = rdp_rail_get_window_state(surface);
+	rail_state->showState_requested = visible ? RDP_WINDOW_SHOW :
+		RDP_WINDOW_HIDE;
+	rail_state->has_requested_visibility = true;
+	rdp_rail_update_window_state(surface);
+}
+
 static void
 rdp_rail_create_window(struct wl_listener *listener, void *data)
 {
@@ -1548,14 +1670,10 @@ rdp_rail_create_window(struct wl_listener *listener, void *data)
 		return;
 	}
 
-	if (!rail_state) {
-		rail_state = xzalloc(sizeof *rail_state);
-		surface->backend_state = rail_state;
-	} else {
-		/* If ever encouter error for this window, no more attempt to create window */
-		if (rail_state->error)
-			return;
-	}
+	rail_state = rdp_rail_get_window_state(surface);
+	/* Do not retry window creation after an error. */
+	if (rail_state->error)
+		return;
 
 	/* windowId can be assigned only after activation completed */
 	if (!rdp_id_manager_allocate_id(&peer_ctx->windowId, surface, &window_id)) {
@@ -1565,11 +1683,6 @@ rdp_rail_create_window(struct wl_listener *listener, void *data)
 		return;
 	}
 	rail_state->window_id = window_id;
-	/* Once this surface is inserted to hash table, we want to be notified for destroy */
-	assert(!rail_state->destroy_listener.notify);
-	rail_state->destroy_listener.notify = rdp_rail_destroy_window;
-	wl_signal_add(&surface->destroy_signal, &rail_state->destroy_listener);
-
 	if (surface->role_name != NULL) {
 		if (strcmp(surface->role_name, "wl_subsurface") == 0) {
 			rail_state->parent_surface = weston_surface_get_main_surface(surface);
@@ -1661,15 +1774,7 @@ rdp_rail_create_window(struct wl_listener *listener, void *data)
 	window_state_order.extendedStyle = WS_EX_LAYERED;
 
 	window_order_info.fieldFlags |= WINDOW_ORDER_FIELD_OWNER;
-	if (rail_state->parent_surface &&
-	    rail_state->parent_surface->backend_state) {
-		struct weston_surface_rail_state *parent_rail_state =
-			rail_state->parent_surface->backend_state;
-
-		window_state_order.ownerWindowId = parent_rail_state->window_id;
-	} else {
-		window_state_order.ownerWindowId = RDP_RAIL_DESKTOP_WINDOW_ID;
-	}
+	window_state_order.ownerWindowId = rdp_rail_window_owner_id(rail_state);
 
 	/* window is created with hidden and no taskbar icon always, and
 	   it become visbile when window has some contents to show. */
@@ -1746,7 +1851,8 @@ rdp_rail_create_window(struct wl_listener *listener, void *data)
 	rail_state->taskbarButton = window_state_order.TaskbarButton;
 	assert(window_state_order.showState == WINDOW_HIDE);
 	rail_state->showState = RDP_WINDOW_HIDE;
-	rail_state->showState_requested = RDP_WINDOW_SHOW; // show window at following update.
+	if (!rail_state->has_requested_visibility)
+		rail_state->showState_requested = RDP_WINDOW_SHOW;
 	pixman_region32_init_rect(&rail_state->damage, 0, 0,
 				  surface->width_from_buffer,
 				  surface->height_from_buffer);
@@ -1914,12 +2020,17 @@ rdp_rail_destroy_window(struct wl_listener *listener, void *data)
 		rail_state->repaint_listener.notify = NULL;
 	}
 
+Exit:
 	if (rail_state->destroy_listener.notify) {
 		wl_list_remove(&rail_state->destroy_listener.link);
 		rail_state->destroy_listener.notify = NULL;
 	}
 
-Exit:
+	if (rail_state->parent_destroy_listener.notify) {
+		wl_list_remove(&rail_state->parent_destroy_listener.link);
+		rail_state->parent_destroy_listener.notify = NULL;
+	}
+
 	free(rail_state);
 	surface->backend_state = NULL;
 
@@ -2008,6 +2119,8 @@ rdp_rail_update_window(struct weston_surface *surface,
 	int numViews;
 	struct weston_view *view;
 	uint32_t window_id;
+	uint32_t owner_window_id;
+	uint32_t state_fields;
 	RdpPeerContext *peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
 	uint32_t new_surface_id = 0;
 	uint32_t old_surface_id = 0;
@@ -2197,35 +2310,32 @@ rdp_rail_update_window(struct weston_surface *surface,
 	}
 
 	/* Adjust the Windows size and position on the screen */
+	owner_window_id = rdp_rail_window_owner_id(rail_state);
 	if (rail_state->clientPos.x != newClientPos.x ||
 	    rail_state->clientPos.y != newClientPos.y ||
 	    rail_state->clientPos.width != newClientPos.width ||
 	    rail_state->clientPos.height != newClientPos.height ||
+	    rail_state->parent_window_id != owner_window_id ||
 	    rail_state->showState != rail_state->showState_requested ||
 	    rail_state->get_label != surface->get_label ||
 	    rail_state->forceUpdateWindowState) {
   		window_order_info.windowId = window_id;
 		window_order_info.fieldFlags =
 			WINDOW_ORDER_TYPE_WINDOW;
+		state_fields = rdp_rail_prepare_window_state_order(
+			rail_state->parent_window_id, owner_window_id,
+			rail_state->showState, rail_state->showState_requested,
+			&window_order_info, &window_state_order);
 
-		if (rail_state->parent_surface &&
-		    rail_state->parent_surface->backend_state) {
-			struct weston_surface_rail_state *parent_rail_state =
-				rail_state->parent_surface->backend_state;
-			if (rail_state->parent_window_id != parent_rail_state->window_id) {
-				window_order_info.fieldFlags |= WINDOW_ORDER_FIELD_OWNER;
+		if (state_fields & WINDOW_ORDER_FIELD_OWNER) {
+			rail_state->parent_window_id = owner_window_id;
 
-				window_state_order.ownerWindowId = parent_rail_state->window_id;
-
-				rail_state->parent_window_id = parent_rail_state->window_id;
-
-				rdp_debug_verbose(b, "WindowUpdate(0x%x - parent window id:%x)\n",
-						  window_id,
-						  rail_state->parent_window_id);
-			}
+			rdp_debug_verbose(b, "WindowUpdate(0x%x - parent window id:%x)\n",
+					  window_id,
+					  rail_state->parent_window_id);
 		}
 
-		if (rail_state->showState != rail_state->showState_requested) {
+		if (state_fields & WINDOW_ORDER_FIELD_SHOW) {
 			rdp_debug_verbose(b, "WindowUpdate(0x%x - showState:%s -> %s)\n",
 					  window_id,
 					  rdp_showstate_to_string(rail_state->showState),
@@ -2238,35 +2348,19 @@ rdp_rail_update_window(struct weston_surface *surface,
 				/* force update window geometry */
 				rail_state->forceUpdateWindowState = true;
 			}
-			window_order_info.fieldFlags |= WINDOW_ORDER_FIELD_SHOW;
-			switch (rail_state->showState_requested) {
-			case RDP_WINDOW_HIDE:
-				window_state_order.showState = WINDOW_HIDE;
-				break;
-			case RDP_WINDOW_SHOW:
-				/* if previoulsy hidden, send minmax info */
-				if (rail_state->showState == WINDOW_HIDE &&
+			if (rail_state->showState_requested == RDP_WINDOW_SHOW) {
+				/* if previously hidden, send minmax info */
+				if (rail_state->showState == RDP_WINDOW_HIDE &&
 				    api && api->request_window_minmax_info)
 					api->request_window_minmax_info(surface);
-				window_state_order.showState = WINDOW_SHOW;
-				break;
-			case RDP_WINDOW_SHOW_MINIMIZED:
-				window_state_order.showState = WINDOW_SHOW_MINIMIZED;
-				break;
-			case RDP_WINDOW_SHOW_MAXIMIZED:
-				window_state_order.showState = WINDOW_SHOW_MAXIMIZED;
-				break;
-			case RDP_WINDOW_SHOW_FULLSCREEN:
+			} else if (rail_state->showState_requested ==
+				   RDP_WINDOW_SHOW_FULLSCREEN) {
 				/* fullscreen is treat as normal window at Window's client */
-				window_state_order.showState = WINDOW_SHOW;
 				/* entering fullscreen mode, change window style */
 				window_order_info.fieldFlags |= WINDOW_ORDER_FIELD_STYLE;
 				window_state_order.style = RAIL_WINDOW_FULLSCREEN_STYLE;
 				/* force update window geometry */
 				rail_state->forceUpdateWindowState = true;
-				break;
-			default:
-				assert(false);
 			}
 			rail_state->showState = rail_state->showState_requested;
 		}
@@ -2486,9 +2580,8 @@ rdp_rail_update_window(struct weston_surface *surface,
 		}
 
 		update = b->rdp_peer->context->update;
-		update->BeginPaint(update->context);
-		update->window->WindowUpdate(update->context, &window_order_info, &window_state_order);
-		update->EndPaint(update->context);
+		rdp_rail_send_window_state_order(update, &window_order_info,
+						 &window_state_order);
 
 		free(rail_window_title_string.string);
 
@@ -4849,6 +4942,8 @@ struct weston_rdprail_api rdprail_api = {
 	.get_primary_output = rdp_rail_get_primary_output,
 	.notify_window_zorder_change = rdp_rail_notify_window_zorder_change,
 	.notify_window_proxy_surface = rdp_rail_notify_window_proxy_surface,
+	.set_window_owner = rdp_rail_set_window_owner,
+	.set_window_visible = rdp_rail_set_window_visible,
 };
 
 int
