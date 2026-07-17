@@ -211,6 +211,18 @@ tests_standalone = [
 	],
 ]
 
+if get_option('backend-rdp')
+	tests_standalone += [
+		[
+			'rdprail-window-state',
+			[
+				'../libweston/backend-rdp/rdprail-window-state.c',
+			],
+			[ dep_zucmain, dep_frdp, dep_libweston_public ],
+		],
+	]
+endif
+
 if get_option('xwayland')
 	d = dependency('x11', required: false)
 	if not d.found()
