@@ -171,6 +171,8 @@ tests = [
 			'text-test.c',
 			text_input_unstable_v1_client_protocol_h,
 			text_input_unstable_v1_protocol_c,
+			text_input_unstable_v3_client_protocol_h,
+			text_input_unstable_v3_protocol_c,
 		],
 	},
 	{

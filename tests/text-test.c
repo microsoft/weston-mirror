@@ -31,6 +31,7 @@
 
 #include "weston-test-client-helper.h"
 #include "text-input-unstable-v1-client-protocol.h"
+#include "text-input-unstable-v3-client-protocol.h"
 #include "weston-test-fixture-compositor.h"
 
 static enum test_result_code
@@ -231,4 +232,108 @@ TEST(text_test)
 	weston_test_activate_surface(client->test->weston_test, NULL);
 	client_roundtrip(client);
 	assert(state.activated == 2 && state.deactivated == 2);
+}
+
+static void
+text_input_v3_enter(void *data,
+		    struct zwp_text_input_v3 *text_input,
+		    struct wl_surface *surface)
+{
+	struct text_input_state *state = data;
+
+	state->activated++;
+}
+
+static void
+text_input_v3_leave(void *data,
+		    struct zwp_text_input_v3 *text_input,
+		    struct wl_surface *surface)
+{
+	struct text_input_state *state = data;
+
+	state->deactivated++;
+}
+
+static void
+text_input_v3_preedit_string(void *data,
+			     struct zwp_text_input_v3 *text_input,
+			     const char *text,
+			     int32_t cursor_begin,
+			     int32_t cursor_end)
+{
+}
+
+static void
+text_input_v3_commit_string(void *data,
+			    struct zwp_text_input_v3 *text_input,
+			    const char *text)
+{
+}
+
+static void
+text_input_v3_delete_surrounding_text(void *data,
+				      struct zwp_text_input_v3 *text_input,
+				      uint32_t before_length,
+				      uint32_t after_length)
+{
+}
+
+static void
+text_input_v3_done(void *data,
+		   struct zwp_text_input_v3 *text_input,
+		   uint32_t serial)
+{
+}
+
+static const struct zwp_text_input_v3_listener text_input_v3_listener = {
+	text_input_v3_enter,
+	text_input_v3_leave,
+	text_input_v3_preedit_string,
+	text_input_v3_commit_string,
+	text_input_v3_delete_surrounding_text,
+	text_input_v3_done,
+};
+
+TEST(text_v3_test)
+{
+	struct client *client;
+	struct global *global;
+	struct zwp_text_input_manager_v3 *manager = NULL;
+	struct zwp_text_input_v3 *text_input;
+	struct text_input_state state = { 0 };
+
+	client = create_client_and_test_surface(100, 100, 100, 100);
+	assert(client);
+
+	wl_list_for_each(global, &client->global_list, link) {
+		if (strcmp(global->interface,
+			   "zwp_text_input_manager_v3") == 0)
+			manager = wl_registry_bind(
+				client->wl_registry, global->name,
+				&zwp_text_input_manager_v3_interface, 1);
+	}
+	assert(manager);
+
+	text_input = zwp_text_input_manager_v3_get_text_input(
+		manager, client->input->wl_seat);
+	zwp_text_input_v3_add_listener(text_input,
+				       &text_input_v3_listener, &state);
+
+	weston_test_activate_surface(client->test->weston_test,
+				 client->surface->wl_surface);
+	client_roundtrip(client);
+	assert(state.activated == 1 && state.deactivated == 0);
+
+	zwp_text_input_v3_enable(text_input);
+	zwp_text_input_v3_set_surrounding_text(text_input, "test", 4, 4);
+	zwp_text_input_v3_set_content_type(
+		text_input, ZWP_TEXT_INPUT_V3_CONTENT_HINT_NONE,
+		ZWP_TEXT_INPUT_V3_CONTENT_PURPOSE_NORMAL);
+	zwp_text_input_v3_set_cursor_rectangle(text_input, 10, 10, 1, 20);
+	zwp_text_input_v3_commit(text_input);
+	client_roundtrip(client);
+
+	weston_test_activate_surface(client->test->weston_test, NULL);
+	client_roundtrip(client);
+	assert(state.activated == 1 && state.deactivated == 1);
 }
