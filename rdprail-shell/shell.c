@@ -4431,6 +4431,8 @@ shell_for_each_layer(struct desktop_shell *shell,
 
 	wl_array_for_each(ws, &shell->workspaces.array)
 		func(shell, &(*ws)->layer, data);
+
+	func(shell, &shell->input_panel_layer, data);
 }
 
 static void
@@ -4983,6 +4985,7 @@ wet_shell_init(struct weston_compositor *ec,
 
 	weston_layer_set_position(&shell->fullscreen_layer,
 				  WESTON_LAYER_POSITION_FULLSCREEN);
+	weston_layer_init(&shell->input_panel_layer, ec);
 
 	wl_array_init(&shell->workspaces.array);
 	wl_list_init(&shell->workspaces.client_list);

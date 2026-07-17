@@ -30,6 +30,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <libweston/backend-rdp.h>
+
 #include "shell.h"
 #include "input-method-unstable-v1-server-protocol.h"
 #include "shared/helpers.h"
@@ -40,30 +42,249 @@ struct input_panel_surface {
 
 	struct desktop_shell *shell;
 
+	struct wl_list link;
 	struct weston_surface *surface;
+	struct weston_view *view;
 	struct wl_listener surface_destroy_listener;
+	struct wl_listener output_destroy_listener;
+	struct wl_event_source *hide_idle;
+
+	struct weston_output *output;
+	uint32_t panel;
+	bool role_set;
 };
+
+static void
+hide_input_panels_now(struct desktop_shell *shell);
+
+static void
+input_panel_handle_owner_destroy(struct wl_listener *listener, void *data)
+{
+	struct desktop_shell *shell =
+		container_of(listener, struct desktop_shell,
+			     text_input.surface_destroy_listener);
+
+	shell->text_input.surface = NULL;
+	shell->text_input.surface_destroy_listener.notify = NULL;
+	hide_input_panels_now(shell);
+
+	(void)data;
+}
+
+static void
+input_panel_set_owner(struct desktop_shell *shell,
+		      struct weston_surface *surface)
+{
+	if (shell->text_input.surface_destroy_listener.notify) {
+		wl_list_remove(&shell->text_input.surface_destroy_listener.link);
+		shell->text_input.surface_destroy_listener.notify = NULL;
+	}
+
+	shell->text_input.surface = surface;
+	if (!surface)
+		return;
+
+	shell->text_input.surface_destroy_listener.notify =
+		input_panel_handle_owner_destroy;
+	wl_signal_add(&surface->destroy_signal,
+		      &shell->text_input.surface_destroy_listener);
+}
+
+static void
+input_panel_surface_set_rail_visibility(struct input_panel_surface *ipsurf,
+					bool visible)
+{
+	const struct weston_rdprail_api *api = ipsurf->shell->rdprail_api;
+
+	if (api->set_window_visible)
+		api->set_window_visible(ipsurf->surface, visible);
+}
+
+static void
+hide_input_panel_surface(struct input_panel_surface *ipsurf)
+{
+	if (ipsurf->hide_idle) {
+		wl_event_source_remove(ipsurf->hide_idle);
+		ipsurf->hide_idle = NULL;
+	}
+
+	if (!weston_surface_is_mapped(ipsurf->surface))
+		return;
+
+	/* RAIL needs the hide update before unmapping clears output_mask. */
+	input_panel_surface_set_rail_visibility(ipsurf, false);
+	weston_surface_unmap(ipsurf->surface);
+}
+
+static void
+hide_input_panel_surface_idle(void *data)
+{
+	struct input_panel_surface *ipsurf = data;
+
+	ipsurf->hide_idle = NULL;
+	hide_input_panel_surface(ipsurf);
+}
+
+static void
+input_panel_handle_output_destroy(struct wl_listener *listener, void *data)
+{
+	struct input_panel_surface *ipsurf =
+		container_of(listener, struct input_panel_surface,
+			     output_destroy_listener);
+
+	ipsurf->output = NULL;
+	ipsurf->output_destroy_listener.notify = NULL;
+	input_panel_surface_set_rail_visibility(ipsurf, false);
+	if (weston_surface_is_mapped(ipsurf->surface))
+		ipsurf->hide_idle = wl_event_loop_add_idle(
+			wl_display_get_event_loop(ipsurf->shell->compositor->wl_display),
+			hide_input_panel_surface_idle, ipsurf);
+
+	(void)data;
+}
+
+static void
+input_panel_surface_set_output(struct input_panel_surface *ipsurf,
+				       struct weston_output *output)
+{
+	if (ipsurf->output_destroy_listener.notify) {
+		wl_list_remove(&ipsurf->output_destroy_listener.link);
+		ipsurf->output_destroy_listener.notify = NULL;
+	}
+
+	ipsurf->output = output;
+	if (!output)
+		return;
+
+	ipsurf->output_destroy_listener.notify = input_panel_handle_output_destroy;
+	wl_signal_add(&output->destroy_signal,
+		      &ipsurf->output_destroy_listener);
+}
+
+static void
+position_input_panel_surface(struct input_panel_surface *ipsurf)
+{
+	struct desktop_shell *shell = ipsurf->shell;
+	struct weston_view *view;
+	float x, y;
+
+	if (ipsurf->panel) {
+		if (!shell->text_input.surface)
+			return;
+
+		view = get_default_view(shell->text_input.surface);
+		if (!view)
+			return;
+
+		weston_view_to_global_float(
+			view,
+			shell->text_input.cursor_rectangle.x2,
+			shell->text_input.cursor_rectangle.y2,
+			&x, &y);
+	} else {
+		if (!ipsurf->output)
+			return;
+
+		x = ipsurf->output->x +
+			(ipsurf->output->width - ipsurf->surface->width) / 2;
+		y = ipsurf->output->y + ipsurf->output->height -
+			ipsurf->surface->height;
+	}
+
+	weston_view_set_position(ipsurf->view, x, y);
+}
+
+static void
+show_input_panel_surface(struct input_panel_surface *ipsurf)
+{
+	struct desktop_shell *shell = ipsurf->shell;
+	struct weston_surface *owner;
+	const struct weston_rdprail_api *api = shell->rdprail_api;
+
+	owner = weston_surface_get_main_surface(shell->text_input.surface);
+	if (api->set_window_owner)
+		api->set_window_owner(ipsurf->surface, owner);
+	position_input_panel_surface(ipsurf);
+	weston_layer_entry_insert(&shell->input_panel_layer.view_list,
+				  &ipsurf->view->layer_link);
+	weston_view_geometry_dirty(ipsurf->view);
+	weston_view_update_transform(ipsurf->view);
+	ipsurf->surface->is_mapped = true;
+	ipsurf->view->is_mapped = true;
+	input_panel_surface_set_rail_visibility(ipsurf, true);
+	weston_surface_damage(ipsurf->surface);
+}
 
 static void
 show_input_panels(struct wl_listener *listener, void *data)
 {
-	struct weston_surface *surface = (struct weston_surface*)data;
+	struct desktop_shell *shell =
+		container_of(listener, struct desktop_shell,
+			     show_input_panel_listener);
+	struct input_panel_surface *ipsurf, *next;
 
-	/* Output who requested to show input panels */
-	if (surface && surface->resource) {
-		pid_t pid;
-		uid_t uid;
-		gid_t gid;
-		struct wl_client *client = wl_resource_get_client(surface->resource);
-		wl_client_get_credentials(client, &pid, &uid, &gid);
-		weston_log("%s pid:%d, uid:%d, gid:%d is requesting to show input panel\n",
-			    __func__, pid, uid, gid);
-		if (pid > 0 && !is_system_distro()) {
-			char path[32] = {};
-			char image_name[256] = {};
-			sprintf(path, "/proc/%d/exe", pid);
-			if (readlink(path, image_name, sizeof image_name) > 0)
-				weston_log("%s pid:%d, image_name:%s\n",__func__, pid, image_name);
+	input_panel_set_owner(shell, data);
+	if (shell->showing_input_panels)
+		return;
+
+	shell->showing_input_panels = true;
+	weston_layer_set_position(&shell->input_panel_layer,
+				  WESTON_LAYER_POSITION_TOP_UI);
+
+	wl_list_for_each_safe(ipsurf, next,
+			      &shell->input_panel.surfaces, link) {
+		if (ipsurf->surface->width == 0 ||
+		    (!ipsurf->panel && !ipsurf->output))
+			continue;
+
+		show_input_panel_surface(ipsurf);
+	}
+}
+
+static void
+hide_input_panels_now(struct desktop_shell *shell)
+{
+	struct input_panel_surface *ipsurf;
+
+	if (!shell->showing_input_panels)
+		return;
+
+	shell->showing_input_panels = false;
+	weston_layer_unset_position(&shell->input_panel_layer);
+
+	wl_list_for_each(ipsurf, &shell->input_panel.surfaces, link)
+		hide_input_panel_surface(ipsurf);
+}
+
+static void
+hide_input_panels(struct wl_listener *listener, void *data)
+{
+	struct desktop_shell *shell =
+		container_of(listener, struct desktop_shell,
+			     hide_input_panel_listener);
+
+	hide_input_panels_now(shell);
+	input_panel_set_owner(shell, NULL);
+
+	(void)data;
+}
+
+static void
+update_input_panels(struct wl_listener *listener, void *data)
+{
+	struct desktop_shell *shell =
+		container_of(listener, struct desktop_shell,
+			     update_input_panel_listener);
+	struct input_panel_surface *ipsurf;
+
+	memcpy(&shell->text_input.cursor_rectangle, data,
+	       sizeof shell->text_input.cursor_rectangle);
+
+	wl_list_for_each(ipsurf, &shell->input_panel.surfaces, link) {
+		if (ipsurf->panel && weston_surface_is_mapped(ipsurf->surface)) {
+			position_input_panel_surface(ipsurf);
+			weston_view_update_transform(ipsurf->view);
+			weston_surface_damage(ipsurf->surface);
 		}
 	}
 }
@@ -77,7 +298,20 @@ input_panel_get_label(struct weston_surface *surface, char *buf, size_t len)
 static void
 input_panel_committed(struct weston_surface *surface, int32_t sx, int32_t sy)
 {
-	weston_log("%s is not expected to be called\n", __func__);
+	struct input_panel_surface *ipsurf = surface->committed_private;
+
+	if (surface->width == 0)
+		return;
+	if (!ipsurf->panel && !ipsurf->output)
+		return;
+
+	position_input_panel_surface(ipsurf);
+	if (!weston_surface_is_mapped(surface) &&
+	    ipsurf->shell->showing_input_panels)
+		show_input_panel_surface(ipsurf);
+
+	(void)sx;
+	(void)sy;
 }
 
 static void
@@ -85,11 +319,16 @@ destroy_input_panel_surface(struct input_panel_surface *input_panel_surface)
 {
 	wl_signal_emit(&input_panel_surface->destroy_signal, input_panel_surface);
 
+	if (input_panel_surface->hide_idle)
+		wl_event_source_remove(input_panel_surface->hide_idle);
 	wl_list_remove(&input_panel_surface->surface_destroy_listener.link);
+	input_panel_surface_set_output(input_panel_surface, NULL);
+	wl_list_remove(&input_panel_surface->link);
 
 	input_panel_surface->surface->committed = NULL;
 	input_panel_surface->surface->committed_private = NULL;
 	weston_surface_set_label_func(input_panel_surface->surface, NULL);
+	weston_view_destroy(input_panel_surface->view);
 
 	free(input_panel_surface);
 }
@@ -118,17 +357,23 @@ create_input_panel_surface(struct desktop_shell *shell,
 	if (!input_panel_surface)
 		return NULL;
 
+	input_panel_surface->shell = shell;
+	input_panel_surface->surface = surface;
+	input_panel_surface->view = weston_view_create(surface);
+	if (!input_panel_surface->view) {
+		free(input_panel_surface);
+		return NULL;
+	}
+
 	surface->committed = input_panel_committed;
 	surface->committed_private = input_panel_surface;
 	weston_surface_set_label_func(surface, input_panel_get_label);
-
-	input_panel_surface->shell = shell;
-	input_panel_surface->surface = surface;
 
 	wl_signal_init(&input_panel_surface->destroy_signal);
 	input_panel_surface->surface_destroy_listener.notify = input_panel_handle_surface_destroy;
 	wl_signal_add(&surface->destroy_signal,
 		      &input_panel_surface->surface_destroy_listener);
+	wl_list_init(&input_panel_surface->link);
 
 	return input_panel_surface;
 }
@@ -139,12 +384,52 @@ input_panel_surface_set_toplevel(struct wl_client *client,
 				 struct wl_resource *output_resource,
 				 uint32_t position)
 {
+	struct input_panel_surface *ipsurf =
+		wl_resource_get_user_data(resource);
+	struct weston_head *head;
+
+	if (ipsurf->role_set) {
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_OBJECT,
+				       "input panel surface role already set");
+		return;
+	}
+
+	head = weston_head_from_resource(output_resource);
+	if (!head || !head->output) {
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_OBJECT,
+				       "input panel output is unavailable");
+		return;
+	}
+
+	wl_list_insert(&ipsurf->shell->input_panel.surfaces, &ipsurf->link);
+	input_panel_surface_set_output(ipsurf, head->output);
+	ipsurf->panel = 0;
+	ipsurf->role_set = true;
+	input_panel_surface_set_rail_visibility(ipsurf, false);
+
+	(void)client;
+	(void)position;
 }
 
 static void
 input_panel_surface_set_overlay_panel(struct wl_client *client,
 				      struct wl_resource *resource)
 {
+	struct input_panel_surface *ipsurf =
+		wl_resource_get_user_data(resource);
+
+	if (ipsurf->role_set) {
+		wl_resource_post_error(resource, WL_DISPLAY_ERROR_INVALID_OBJECT,
+				       "input panel surface role already set");
+		return;
+	}
+
+	wl_list_insert(&ipsurf->shell->input_panel.surfaces, &ipsurf->link);
+	ipsurf->panel = 1;
+	ipsurf->role_set = true;
+	input_panel_surface_set_rail_visibility(ipsurf, false);
+
+	(void)client;
 }
 
 static const struct zwp_input_panel_surface_v1_interface input_panel_surface_implementation = {
@@ -245,7 +530,10 @@ bind_input_panel(struct wl_client *client,
 void
 input_panel_destroy(struct desktop_shell *shell)
 {
+	input_panel_set_owner(shell, NULL);
 	wl_list_remove(&shell->show_input_panel_listener.link);
+	wl_list_remove(&shell->hide_input_panel_listener.link);
+	wl_list_remove(&shell->update_input_panel_listener.link);
 }
 
 int
@@ -256,6 +544,14 @@ input_panel_setup(struct desktop_shell *shell)
 	shell->show_input_panel_listener.notify = show_input_panels;
 	wl_signal_add(&ec->show_input_panel_signal,
 		      &shell->show_input_panel_listener);
+	shell->hide_input_panel_listener.notify = hide_input_panels;
+	wl_signal_add(&ec->hide_input_panel_signal,
+		      &shell->hide_input_panel_listener);
+	shell->update_input_panel_listener.notify = update_input_panels;
+	wl_signal_add(&ec->update_input_panel_signal,
+		      &shell->update_input_panel_listener);
+
+	wl_list_init(&shell->input_panel.surfaces);
 
 	if (wl_global_create(shell->compositor->wl_display,
 			     &zwp_input_panel_v1_interface, 1,
@@ -264,4 +560,3 @@ input_panel_setup(struct desktop_shell *shell)
 
 	return 0;
 }
-
