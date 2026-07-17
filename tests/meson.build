@@ -216,6 +216,23 @@ tests = [
 	{	'name': 'viewporter-shot', },
 ]
 
+if get_option('backend-rdp') and get_option('shell-rdprail')
+	tests += {
+		'name': 'rdprail-input-panel',
+		'sources': [
+			'rdprail-input-panel-test.c',
+			input_method_unstable_v1_client_protocol_h,
+			input_method_unstable_v1_protocol_c,
+			text_input_unstable_v1_client_protocol_h,
+			text_input_unstable_v1_protocol_c,
+			weston_rdprail_test_client_protocol_h,
+			weston_rdprail_test_protocol_c,
+		],
+		'dep_objs': dep_frdp,
+		'test_deps': [ plugin_rdprail_test ],
+	}
+endif
+
 tests_standalone = [
 	['config-parser', [], [ dep_zucmain ]],
 	['matrix', [], [ dep_libm, dep_matrix_c ]],
