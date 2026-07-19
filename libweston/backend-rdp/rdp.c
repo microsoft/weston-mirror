@@ -987,7 +987,7 @@ struct rdp_to_xkb_keyboard_layout rdp_keyboards[] = {
 	{KBD_UNITED_KINGDOM, "gb", 0},
 	{KBD_LATIN_AMERICAN, "latam", 0},
 	{KBD_BELGIAN_FRENCH, "be", 0},
-	{KBD_BELGIAN_PERIOD, "be", "oss_sundeadkeys"},
+	{KBD_BELGIAN_PERIOD, "be", 0}, // variant is changed to 0 from "oss_sundeadkeys".
 	{KBD_PORTUGUESE, "pt", 0},
 	{KBD_SERBIAN_LATIN, "rs", 0},
 	{KBD_AZERI_CYRILLIC, "az", "cyrillic"},
