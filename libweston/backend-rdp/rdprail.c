@@ -4949,12 +4949,16 @@ rdp_rail_backend_create(struct rdp_backend *b, struct weston_rdp_backend_config 
 		struct weston_rdp_shared_memory shmem = {};
 
 		use_gfxredir = false;
-		shmem.size = sysconf(_SC_PAGESIZE);
-		if (rdp_allocate_shared_memory(b, &shmem)) {
-			*(uint32_t *)shmem.addr = 0x12344321;
-			assert(*(uint32_t *)shmem.addr == 0x12344321);
-			rdp_free_shared_memory(b, &shmem);
-			use_gfxredir = true;
+		for (int idx = 0; idx < 3; ++idx) {
+			shmem.size = sysconf(_SC_PAGESIZE);
+			if (rdp_allocate_shared_memory(b, &shmem)) {
+				*(uint32_t *)shmem.addr = 0x12344321;
+				assert(*(uint32_t *)shmem.addr == 0x12344321);
+				rdp_free_shared_memory(b, &shmem);
+				use_gfxredir = true;
+				break;
+			}
+			sleep(3);
 		}
 	}
 
