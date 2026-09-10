@@ -3998,6 +3998,7 @@ rdp_rail_peer_context_free(freerdp_peer *client, RdpPeerContext *context)
 		context->applist_server_context->Close(context->applist_server_context);
 		assert(b->rdpapplist_server_context_free);
 		b->rdpapplist_server_context_free(context->applist_server_context);
+		context->applist_server_context = NULL;
 	}
 #endif /* HAVE_FREERDP_RDPAPPLIST_H */
 
@@ -4010,22 +4011,26 @@ rdp_rail_peer_context_free(freerdp_peer *client, RdpPeerContext *context)
 		redir_ctx->Close(redir_ctx);
 		assert(b->gfxredir_server_context_free);
 		b->gfxredir_server_context_free(redir_ctx);
+		context->gfxredir_server_context = NULL;
 	}
 #endif /* HAVE_FREERDP_GFXREDIR_H */
 
 	if (gfx_ctx) {
 		gfx_ctx->Close(gfx_ctx);
 		rdpgfx_server_context_free(gfx_ctx);
+		context->rail_grfx_server_context = NULL;
 	}
 
 	if (disp_ctx) {
 		disp_ctx->Close(disp_ctx);
 		disp_server_context_free(disp_ctx);
+		context->disp_server_context = NULL;
 	}
 
 	if (rail_ctx) {
 		rail_ctx->Stop(rail_ctx);
 		rail_server_context_free(rail_ctx);
+		context->rail_server_context = NULL;
 	}
 
 	if (context->clientExec_destroy_listener.notify) {
@@ -4062,7 +4067,6 @@ rdp_drdynvc_init(freerdp_peer *client)
 	/* Open Dynamic virtual channel */
 	vc_ctx = drdynvc_server_context_new(peer_ctx->vcm);
 
-	peer_ctx->drdynvc_server_context = drdynvc_server_context_new(peer_ctx->vcm);
 	if (!vc_ctx)
 		return false;
 	if (vc_ctx->Start(vc_ctx) != CHANNEL_RC_OK) {
@@ -4099,6 +4103,7 @@ rdp_drdynvc_destroy(RdpPeerContext *context)
 	if (vc_ctx) {
 		vc_ctx->Stop(vc_ctx);
 		drdynvc_server_context_free(vc_ctx);
+		context->drdynvc_server_context = NULL;
 	}
 }
 

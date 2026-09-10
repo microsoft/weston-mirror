@@ -1258,10 +1258,14 @@ xf_peer_activate(freerdp_peer* client)
 error_exit:
 
 	rdp_clipboard_destroy(peerCtx);
-	if (settings->AudioPlayback && peerCtx->audio_out_private)
+	if (settings->AudioPlayback && peerCtx->audio_out_private) {
 		b->audio_out_teardown(peerCtx->audio_out_private);
-	if (settings->AudioCapture && peerCtx->audio_in_private)
+		peerCtx->audio_out_private = NULL;
+	}
+	if (settings->AudioCapture && peerCtx->audio_in_private) {
 		b->audio_in_teardown(peerCtx->audio_in_private);
+		peerCtx->audio_in_private = NULL;
+	}
 	rdp_rail_peer_context_free(client, peerCtx);
 	rdp_drdynvc_destroy(peerCtx);
 
