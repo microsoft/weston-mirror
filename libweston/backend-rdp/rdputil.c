@@ -256,6 +256,9 @@ rdp_id_manager_init(struct rdp_backend *rdp_backend, struct rdp_id_manager *id_m
 void
 rdp_id_manager_free(struct rdp_id_manager *id_manager)
 {
+	if (!id_manager->rdp_backend)
+		return;
+
 	assert_compositor_thread(id_manager->rdp_backend);
 
 	if (id_manager->id_used != 0)
@@ -307,10 +310,10 @@ rdp_id_manager_lookup(struct rdp_id_manager *id_manager, UINT32 id)
 void
 rdp_id_manager_for_each(struct rdp_id_manager *id_manager, hash_table_iterator_func_t func, void *data)
 {
-	assert_compositor_thread(id_manager->rdp_backend);
-
 	if (!id_manager->hash_table)
 		return;
+
+	assert_compositor_thread(id_manager->rdp_backend);
 
 	hash_table_for_each(id_manager->hash_table, func, data);
 }

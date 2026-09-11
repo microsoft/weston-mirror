@@ -203,6 +203,21 @@ tests_standalone = [
 	],
 ]
 
+if get_option('backend-rdp')
+	tests_standalone += [[
+		'rdp-teardown',
+		[],
+		deps_rdp + [ dep_zucmain ],
+		plugin_rdp.extract_objects(
+			'hash.c',
+			'rdpdisp.c',
+			'rdpclip.c',
+			'rdprail.c',
+			'rdputil.c',
+		),
+	]]
+endif
+
 if get_option('xwayland')
 	d = dependency('x11', required: false)
 	if not d.found()
@@ -322,6 +337,7 @@ foreach t : tests_standalone
 		build_by_default: true,
 		include_directories: common_inc,
 		dependencies: deps_t,
+		objects: t.length() > 3 ? t[3] : [],
 		install: false,
 	)
 
