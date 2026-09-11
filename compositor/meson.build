@@ -9,6 +9,8 @@ srcs_weston = [
 	'weston-screenshooter.c',
 	text_input_unstable_v1_server_protocol_h,
 	text_input_unstable_v1_protocol_c,
+	text_input_unstable_v3_server_protocol_h,
+	text_input_unstable_v3_protocol_c,
 	input_method_unstable_v1_server_protocol_h,
 	input_method_unstable_v1_protocol_c,
 	weston_screenshooter_server_protocol_h,

@@ -1,0 +1,5 @@
+[test-shell]
+text-backend=true
+
+[input-method]
+path=@TEST_INPUT_METHOD_PATH@
