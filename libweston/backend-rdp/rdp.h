@@ -26,6 +26,8 @@
 #ifndef RDP_H
 #define RDP_H
 
+#include "shared/window-state-sync.h"
+
 #include <freerdp/version.h>
 
 #include <freerdp/freerdp.h>
@@ -261,7 +263,8 @@ struct rdp_peer_context {
 	struct wl_listener idle_listener;
 	struct wl_listener wake_listener;
 
-	bool is_window_zorder_dirty;
+	struct weston_window_state_sync window_zorder_sync;
+	struct wl_event_source *window_zorder_timer;
 
 	// Multiple monitor support (monitor topology)
 	int32_t desktop_top, desktop_left, desktop_width, desktop_height;

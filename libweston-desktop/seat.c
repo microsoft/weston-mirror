@@ -52,6 +52,40 @@ struct weston_desktop_seat {
 
 static void weston_desktop_seat_popup_grab_end(struct weston_desktop_seat *seat);
 
+static bool
+popup_grab_contains_surface(struct weston_desktop_seat *seat,
+			    struct weston_surface *surface)
+{
+	struct wl_list *link;
+
+	if (!surface)
+		return false;
+	surface = weston_surface_get_main_surface(surface);
+	for (link = seat->popup_grab.surfaces.next;
+	     link != &seat->popup_grab.surfaces; link = link->next) {
+		struct weston_desktop_surface *popup =
+			weston_desktop_surface_from_grab_link(link);
+
+		if (weston_desktop_surface_get_surface(popup) == surface)
+			return true;
+	}
+	return false;
+}
+
+WL_EXPORT void
+weston_seat_dismiss_popup_grab(struct weston_seat *wseat,
+			     struct weston_surface *activated)
+{
+	struct weston_desktop_seat *seat;
+
+	if (!wseat)
+		return;
+	seat = weston_desktop_seat_from_seat(wseat);
+	if (seat && !wl_list_empty(&seat->popup_grab.surfaces) &&
+	    !popup_grab_contains_surface(seat, activated))
+		weston_desktop_seat_popup_grab_end(seat);
+}
+
 static void
 weston_desktop_seat_popup_grab_keyboard_key(struct weston_keyboard_grab *grab,
 					    const struct timespec *time,
@@ -100,9 +134,7 @@ weston_desktop_seat_popup_grab_pointer_focus(struct weston_pointer_grab *grab)
 	view = weston_compositor_pick_view(pointer->seat->compositor,
 					   pointer->x, pointer->y, &sx, &sy);
 
-	if (view != NULL &&
-	    view->surface->resource != NULL &&
-	    wl_resource_get_client(view->surface->resource) == seat->popup_grab.client)
+	if (view != NULL && popup_grab_contains_surface(seat, view->surface))
 		weston_pointer_set_focus(pointer, view, sx, sy);
 	else
 		weston_pointer_clear_focus(pointer);
@@ -126,6 +158,8 @@ weston_desktop_seat_popup_grab_pointer_button(struct weston_pointer_grab *grab,
 		wl_container_of(grab, seat, popup_grab.pointer);
 	struct weston_pointer *pointer = grab->pointer;
 	bool initial_up = seat->popup_grab.initial_up;
+
+	weston_desktop_seat_popup_grab_pointer_focus(grab);
 
 	if (state == WL_POINTER_BUTTON_STATE_RELEASED)
 		seat->popup_grab.initial_up = true;
@@ -327,7 +361,7 @@ weston_desktop_seat_popup_grab_end(struct weston_desktop_seat *seat)
 	struct weston_touch *touch = weston_seat_get_touch(seat->seat);
 
 	while (!wl_list_empty(&seat->popup_grab.surfaces)) {
-		struct wl_list *link = seat->popup_grab.surfaces.prev;
+		struct wl_list *link = seat->popup_grab.surfaces.next;
 		struct weston_desktop_surface *surface =
 			weston_desktop_surface_from_grab_link(link);
 

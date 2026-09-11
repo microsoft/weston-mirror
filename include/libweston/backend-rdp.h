@@ -194,6 +194,7 @@ struct weston_rdprail_api {
 	/** Notify window proxy surface
 	 */
 	void (*notify_window_proxy_surface)(struct weston_surface *proxy_surface);
+	void (*notify_popup_state)(struct weston_surface *surface, bool mapped);
 };
 
 static inline const struct weston_rdprail_api *

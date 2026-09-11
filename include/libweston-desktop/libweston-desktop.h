@@ -126,7 +126,20 @@ struct weston_desktop_api {
 	 */
 	void (*move_xwayland_position)(struct weston_desktop_surface *surface,
 				       int32_t x, int32_t y, void *user_data);
+	/* Optional global logical work area, excluding shell panels. */
+	void (*get_work_area)(struct weston_output *output,
+			     pixman_rectangle32_t *area, void *user_data);
+	/* Popup visibility is independent of the lifetime of its wl_surface. */
+	void (*popup_state_changed)(struct weston_desktop_surface *surface,
+				    bool mapped, void *user_data);
 };
+
+void
+weston_desktop_surface_update_popup_positions(struct weston_desktop_surface *surface);
+
+void
+weston_seat_dismiss_popup_grab(struct weston_seat *seat,
+			     struct weston_surface *activated);
 
 void
 weston_seat_break_desktop_grabs(struct weston_seat *seat);
