@@ -18,7 +18,7 @@ lib_desktop = shared_library(
 	include_directories: common_inc,
 	install: true,
 	version: '0.0.@0@'.format(libweston_revision),
-	dependencies: dep_libweston_public
+	dependencies: [ dep_libweston_public, dep_libm ]
 )
 dep_lib_desktop = declare_dependency(
 	link_with: lib_desktop,

@@ -1,3 +1,9 @@
+foreach name : ['popup-constraint', 'window-state-sync']
+	exe = executable('test-' + name, name + '-test.c',
+		include_directories: common_inc, install: false)
+	test(name, exe)
+endforeach
+
 plugin_test_shell_desktop = shared_library(
 	'weston-test-desktop-shell',
 	'weston-test-desktop-shell.c',

@@ -1572,6 +1572,9 @@ void
 weston_view_from_global(struct weston_view *view,
 			int32_t x, int32_t y, int32_t *vx, int32_t *vy);
 void
+weston_view_from_global_float(struct weston_view *view,
+			      float x, float y, float *vx, float *vy);
+void
 weston_view_from_global_fixed(struct weston_view *view,
 			      wl_fixed_t x, wl_fixed_t y,
 			      wl_fixed_t *vx, wl_fixed_t *vy);

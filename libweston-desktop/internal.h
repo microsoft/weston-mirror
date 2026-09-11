@@ -29,6 +29,26 @@
 struct weston_desktop_seat;
 struct weston_desktop_client;
 
+void
+weston_desktop_api_get_work_area(struct weston_desktop *desktop,
+				struct weston_output *output,
+				pixman_rectangle32_t *area);
+void
+weston_desktop_api_popup_state_changed(struct weston_desktop *desktop,
+				     struct weston_desktop_surface *surface,
+				     bool mapped);
+void
+weston_desktop_surface_set_popup(struct weston_desktop_surface *surface);
+void
+weston_desktop_surface_unmap_popup(struct weston_desktop_surface *surface);
+void
+weston_desktop_surface_constrain_popup(struct weston_desktop_surface *surface,
+				       struct weston_desktop_surface *parent,
+				       struct weston_geometry *geometry,
+				       struct weston_geometry anchor,
+				       struct weston_position offset,
+				       uint32_t adjustment);
+
 struct weston_compositor *
 weston_desktop_get_compositor(struct weston_desktop *desktop);
 struct wl_display *

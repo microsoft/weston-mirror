@@ -46,6 +46,28 @@ struct weston_desktop {
 };
 
 void
+weston_desktop_api_get_work_area(struct weston_desktop *desktop,
+				struct weston_output *output,
+				pixman_rectangle32_t *area)
+{
+	*area = (pixman_rectangle32_t) {
+		output->x, output->y, output->width, output->height
+	};
+	if (desktop->api.get_work_area)
+		desktop->api.get_work_area(output, area, desktop->user_data);
+}
+
+void
+weston_desktop_api_popup_state_changed(struct weston_desktop *desktop,
+				     struct weston_desktop_surface *surface,
+				     bool mapped)
+{
+	if (desktop->api.popup_state_changed)
+		desktop->api.popup_state_changed(surface, mapped,
+					 desktop->user_data);
+}
+
+void
 weston_desktop_destroy_request(struct wl_client *client,
 			       struct wl_resource *resource)
 {

@@ -25,6 +25,8 @@
 
 #include <string.h>
 #include <assert.h>
+#include <math.h>
+#include <limits.h>
 
 #include <wayland-server.h>
 
@@ -33,6 +35,7 @@
 
 #include <libweston-desktop/libweston-desktop.h>
 #include "internal.h"
+#include "shared/popup-constraint.h"
 
 struct weston_desktop_view {
 	struct wl_list link;
@@ -55,6 +58,13 @@ struct weston_desktop_surface {
 	struct wl_listener surface_commit_listener;
 	struct wl_listener surface_destroy_listener;
 	struct wl_listener client_destroy_listener;
+	struct wl_listener transform_listener;
+	struct wl_listener output_resize_listener;
+	bool updating_position;
+	bool popup;
+	bool popup_mapped;
+	bool popup_dismissed;
+	bool popup_unmapped;
 	struct wl_list children_list;
 
 	struct wl_list resource_list;
@@ -105,6 +115,103 @@ weston_desktop_surface_update_view_position(struct weston_desktop_surface *surfa
 static void
 weston_desktop_view_propagate_layer(struct weston_desktop_view *view);
 
+WL_EXPORT void
+weston_desktop_surface_update_popup_positions(struct weston_desktop_surface *surface)
+{
+	struct weston_desktop_surface *child;
+
+	if (surface->updating_position || surface->popup_dismissed ||
+	    surface->popup_unmapped)
+		return;
+	surface->updating_position = true;
+	if (surface->popup && surface->parent &&
+	    surface->implementation->update_position)
+		surface->implementation->update_position(surface,
+						 surface->implementation_data);
+	wl_list_for_each(child, &surface->children_list, children_link)
+		weston_desktop_surface_update_popup_positions(child);
+	surface->updating_position = false;
+}
+
+static void
+desktop_surface_transform_changed(struct wl_listener *listener, void *data)
+{
+	struct weston_desktop_surface *surface =
+		wl_container_of(listener, surface, transform_listener);
+	struct weston_desktop_surface *child;
+
+	if (data != surface->surface || surface->updating_position)
+		return;
+	/* A popup's own transform is the result, not an input, of placement. */
+	wl_list_for_each(child, &surface->children_list, children_link)
+		weston_desktop_surface_update_popup_positions(child);
+}
+
+static void
+desktop_surface_output_resized(struct wl_listener *listener, void *data)
+{
+	struct weston_desktop_surface *surface =
+		wl_container_of(listener, surface, output_resize_listener);
+
+	if (!surface->parent)
+		weston_desktop_surface_update_popup_positions(surface);
+}
+
+void
+weston_desktop_surface_set_popup(struct weston_desktop_surface *surface)
+{
+	surface->popup = true;
+}
+
+void
+weston_desktop_surface_constrain_popup(struct weston_desktop_surface *surface,
+				       struct weston_desktop_surface *parent,
+				       struct weston_geometry *geometry,
+				       struct weston_geometry anchor,
+				       struct weston_position offset,
+				       uint32_t adjustment)
+{
+	struct weston_view *view;
+	struct weston_geometry pg;
+	pixman_rectangle32_t area;
+	float x1, y1, x2, y2;
+	int64_t x = geometry->x, y = geometry->y;
+	int64_t width = geometry->width, height = geometry->height;
+	int64_t flip_x, flip_y;
+
+	if (!adjustment || wl_list_empty(&parent->surface->views))
+		return;
+	view = wl_container_of(parent->surface->views.next, view, surface_link);
+	weston_view_update_transform(view);
+	if (!view->output)
+		return;
+	weston_desktop_api_get_work_area(surface->desktop, view->output, &area);
+	if (!area.width || !area.height)
+		return;
+	pg = weston_desktop_surface_get_geometry(parent);
+	weston_view_from_global_float(view, area.x, area.y, &x1, &y1);
+	weston_view_from_global_float(view, (double)area.x + area.width,
+				     (double)area.y + area.height, &x2, &y2);
+	/* Reflect anchor and gravity, but preserve the requested offset. */
+	flip_x = 2 * (int64_t)anchor.x + anchor.width - x - width +
+		 2 * (int64_t)offset.x;
+	flip_y = 2 * (int64_t)anchor.y + anchor.height - y - height +
+		 2 * (int64_t)offset.y;
+	/* stable and v6 use the same constraint-adjustment bit values. */
+	popup_constrain_axis(&x, &width, flip_x,
+		ceil(fmin(x1, x2)) - pg.x, floor(fmax(x1, x2)) - pg.x,
+		adjustment & 4, adjustment & 1, adjustment & 16);
+	popup_constrain_axis(&y, &height, flip_y,
+		ceil(fmin(y1, y2)) - pg.y, floor(fmax(y1, y2)) - pg.y,
+		adjustment & 8, adjustment & 2, adjustment & 32);
+	if (x < INT32_MIN || x > INT32_MAX || y < INT32_MIN || y > INT32_MAX)
+		return;
+	geometry->x = x;
+	geometry->y = y;
+	geometry->width = width;
+	geometry->height = height;
+}
+
 static void
 weston_desktop_view_destroy(struct weston_desktop_view *view)
 {
@@ -128,6 +235,12 @@ weston_desktop_surface_destroy(struct weston_desktop_surface *surface)
 {
 	struct weston_desktop_view *view, *next_view;
 	struct weston_desktop_surface *child, *next_child;
+
+	weston_desktop_surface_unmap_popup(surface);
+	wl_list_for_each_reverse(child, &surface->children_list, children_link)
+		weston_desktop_surface_unmap_popup(child);
+	wl_list_remove(&surface->transform_listener.link);
+	wl_list_remove(&surface->output_resize_listener.link);
 
 	wl_list_remove(&surface->surface_commit_listener.link);
 	wl_list_remove(&surface->surface_destroy_listener.link);
@@ -170,6 +283,15 @@ weston_desktop_surface_surface_committed(struct wl_listener *listener,
 	struct weston_desktop_surface *surface =
 		wl_container_of(listener, surface, surface_commit_listener);
 
+	if (surface->popup) {
+		if (surface->popup_dismissed || surface->popup_unmapped)
+			return;
+		if (surface->popup_mapped && !surface->surface->buffer_ref.buffer) {
+			weston_desktop_surface_unmap_popup(surface);
+			return;
+		}
+	}
+
 	if (surface->implementation->committed != NULL)
 		surface->implementation->committed(surface,
 						   surface->implementation_data,
@@ -179,12 +301,15 @@ weston_desktop_surface_surface_committed(struct wl_listener *listener,
 	if (surface->parent != NULL) {
 		struct weston_desktop_view *view;
 
+		/* Apply committed window geometry (including shadow offsets) before
+		 * mapping or emitting transforms used to position child popups. */
+		weston_desktop_surface_update_view_position(surface);
 		wl_list_for_each(view, &surface->view_list, link) {
 			weston_view_set_transform_parent(view->view,
 							 view->parent->view);
+			weston_view_update_transform(view->view);
 			weston_desktop_view_propagate_layer(view->parent);
 		}
-		weston_desktop_surface_update_view_position(surface);
 	}
 
 	if (!wl_list_empty(&surface->children_list)) {
@@ -196,6 +321,13 @@ weston_desktop_surface_surface_committed(struct wl_listener *listener,
 
 	surface->buffer_move.x = 0;
 	surface->buffer_move.y = 0;
+	weston_desktop_surface_update_popup_positions(surface);
+	if (surface->popup && !surface->popup_mapped &&
+	    surface->surface->buffer_ref.buffer) {
+		surface->popup_mapped = true;
+		weston_desktop_api_popup_state_changed(surface->desktop,
+						 surface, true);
+	}
 }
 
 static void
@@ -260,6 +392,12 @@ weston_desktop_surface_create(struct weston_desktop *desktop,
 	surface->implementation = implementation;
 	surface->implementation_data = implementation_data;
 	surface->surface = wsurface;
+	surface->transform_listener.notify = desktop_surface_transform_changed;
+	wl_signal_add(&wsurface->compositor->transform_signal,
+		      &surface->transform_listener);
+	surface->output_resize_listener.notify = desktop_surface_output_resized;
+	wl_signal_add(&wsurface->compositor->output_resized_signal,
+		      &surface->output_resize_listener);
 
 	surface->client = client;
 	surface->client_destroy_listener.notify =
@@ -435,6 +573,13 @@ weston_desktop_view_propagate_layer(struct weston_desktop_view *view)
 	wl_list_for_each_reverse(child, &view->children_list, children_link) {
 		struct weston_layer_entry *prev =
 			wl_container_of(link->prev, prev, link);
+		struct weston_desktop_surface *surface =
+			weston_surface_get_desktop_surface(child->view->surface);
+
+		/* The initial, bufferless xdg commit only requests configure. */
+		if (surface && surface->popup &&
+		    !child->view->surface->buffer_ref.buffer)
+			continue;
 
 		if (prev == &child->view->layer_link)
 			continue;
@@ -746,8 +891,10 @@ weston_desktop_surface_set_relative_to(struct weston_desktop_surface *surface,
 	surface->position.y = y;
 	surface->use_geometry = use_geometry;
 
-	if (surface->parent == parent)
+	if (surface->parent == parent) {
+		weston_desktop_surface_update_view_position(surface);
 		return;
+	}
 
 	surface->parent = parent;
 	wl_list_remove(&surface->children_link);
@@ -768,6 +915,7 @@ weston_desktop_surface_set_relative_to(struct weston_desktop_surface *surface,
 		}
 
 		view->parent = parent_view;
+		weston_view_set_transform_parent(view->view, parent_view->view);
 		wl_list_insert(parent_view->children_list.prev,
 			       &view->children_link);
 		weston_desktop_view_propagate_layer(view);
@@ -779,6 +927,7 @@ weston_desktop_surface_set_relative_to(struct weston_desktop_surface *surface,
 		view = wl_container_of(link, view, link);
 		weston_desktop_view_destroy(view);
 	}
+	weston_desktop_surface_update_view_position(surface);
 }
 
 void
@@ -804,6 +953,12 @@ weston_desktop_surface_popup_grab(struct weston_desktop_surface *surface,
 {
 	struct wl_client *wl_client =
 		weston_desktop_client_get_client(surface->client);
+
+	/* wl_shell can reuse a shell surface for another popup. */
+	if (!surface->popup) {
+		surface->popup_dismissed = false;
+		surface->popup_unmapped = false;
+	}
 	if (weston_desktop_seat_popup_grab_start(seat, wl_client, serial))
 		weston_desktop_seat_popup_grab_add_surface(seat, &surface->grab_link);
 	else
@@ -820,11 +975,30 @@ weston_desktop_surface_popup_ungrab(struct weston_desktop_surface *surface,
 void
 weston_desktop_surface_popup_dismiss(struct weston_desktop_surface *surface)
 {
-	struct weston_desktop_view *view, *tmp;
-
-	wl_list_for_each_safe(view, tmp, &surface->view_list, link)
-		weston_desktop_view_destroy(view);
+	if (surface->popup_dismissed)
+		return;
+	surface->popup_dismissed = true;
+	weston_desktop_surface_unmap_popup(surface);
 	wl_list_remove(&surface->grab_link);
 	wl_list_init(&surface->grab_link);
 	weston_desktop_surface_close(surface);
+}
+
+void
+weston_desktop_surface_unmap_popup(struct weston_desktop_surface *surface)
+{
+	struct weston_desktop_view *view, *tmp;
+	struct weston_desktop_surface *child;
+
+	if ((!surface->popup && !surface->popup_dismissed) ||
+	    surface->popup_unmapped)
+		return;
+	surface->popup_unmapped = true;
+	surface->popup_mapped = false;
+	wl_list_for_each_reverse(child, &surface->children_list, children_link)
+		weston_desktop_surface_unmap_popup(child);
+
+	wl_list_for_each_safe(view, tmp, &surface->view_list, link)
+		weston_desktop_view_destroy(view);
+	weston_desktop_api_popup_state_changed(surface->desktop, surface, false);
 }

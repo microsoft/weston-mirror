@@ -129,9 +129,14 @@ struct weston_desktop_xdg_popup {
 	struct weston_desktop_xdg_surface *parent;
 	struct weston_desktop_seat *seat;
 	struct weston_geometry geometry;
+	struct weston_desktop_xdg_positioner positioner;
 };
 
-#define weston_desktop_surface_role_biggest_size (sizeof(struct weston_desktop_xdg_toplevel))
+#define weston_desktop_surface_role_biggest_size \
+	(sizeof(struct weston_desktop_xdg_toplevel) > \
+	 sizeof(struct weston_desktop_xdg_popup) ? \
+	 sizeof(struct weston_desktop_xdg_toplevel) : \
+	 sizeof(struct weston_desktop_xdg_popup))
 #define weston_desktop_surface_configure_biggest_size (sizeof(struct weston_desktop_xdg_toplevel))
 
 
@@ -210,7 +215,10 @@ weston_desktop_xdg_positioner_get_geometry(struct weston_desktop_xdg_positioner 
 	if (positioner->constraint_adjustment == XDG_POSITIONER_CONSTRAINT_ADJUSTMENT_NONE)
 		return geometry;
 
-	/* TODO: add compositor policy configuration and the code here */
+	weston_desktop_surface_constrain_popup(dsurface, parent, &geometry,
+					       positioner->anchor_rect,
+					       positioner->offset,
+					       positioner->constraint_adjustment);
 
 	return geometry;
 }
@@ -869,13 +877,8 @@ weston_desktop_xdg_popup_update_position(struct weston_desktop_surface *dsurface
 static void
 weston_desktop_xdg_popup_committed(struct weston_desktop_xdg_popup *popup)
 {
-	struct weston_surface *wsurface =
-		weston_desktop_surface_get_surface (popup->base.desktop_surface);
-	struct weston_view *view;
-
-	wl_list_for_each(view, &wsurface->views, surface_link)
-		weston_view_update_transform(view);
-
+	/* surface.c applies the committed window geometry before transforming
+	 * and mapping views. Publishing a transform here exposes old offsets. */
 	if (!popup->committed)
 		weston_desktop_xdg_surface_schedule_configure(&popup->base);
 	popup->committed = true;
@@ -887,6 +890,26 @@ static void
 weston_desktop_xdg_popup_update_position(struct weston_desktop_surface *dsurface,
 					 void *user_data)
 {
+	struct weston_desktop_xdg_popup *popup = user_data;
+	struct weston_desktop_surface *parent;
+	struct weston_geometry geometry;
+
+	if (popup->base.role != WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP)
+		return;
+	parent = weston_desktop_surface_get_parent(dsurface);
+	if (!parent)
+		return;
+	geometry = weston_desktop_xdg_positioner_get_geometry(
+		&popup->positioner, dsurface, parent);
+	if (geometry.x == popup->geometry.x && geometry.y == popup->geometry.y &&
+	    geometry.width == popup->geometry.width &&
+	    geometry.height == popup->geometry.height)
+		return;
+	popup->geometry = geometry;
+	weston_desktop_surface_set_relative_to(dsurface, parent,
+					       geometry.x, geometry.y, true);
+	if (popup->committed)
+		weston_desktop_xdg_surface_schedule_configure(&popup->base);
 }
 
 static void
@@ -1134,6 +1157,10 @@ weston_desktop_xdg_surface_protocol_get_popup(struct wl_client *wl_client,
 
 	popup->base.role = WESTON_DESKTOP_XDG_SURFACE_ROLE_POPUP;
 	popup->parent = parent;
+	popup->positioner = *positioner;
+	/* The client may destroy the positioner immediately after get_popup. */
+	popup->positioner.resource = NULL;
+	weston_desktop_surface_set_popup(popup->base.desktop_surface);
 
 	popup->geometry =
 		weston_desktop_xdg_positioner_get_geometry(positioner,

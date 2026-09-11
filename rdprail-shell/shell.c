@@ -3400,7 +3400,27 @@ desktop_surface_move_xwayland_position(struct weston_desktop_surface *desktop_su
 	}
 }
 
+static void
+desktop_get_work_area(struct weston_output *output,
+		      pixman_rectangle32_t *area, void *data)
+{
+	get_output_work_area(data, output, area);
+}
+
+static void
+desktop_popup_state_changed(struct weston_desktop_surface *desktop_surface,
+			    bool mapped, void *data)
+{
+	struct desktop_shell *shell = data;
+
+	if (shell->rdprail_api->notify_popup_state)
+		shell->rdprail_api->notify_popup_state(
+			weston_desktop_surface_get_surface(desktop_surface), mapped);
+}
+
 static const struct weston_desktop_api shell_desktop_api = {
+	.get_work_area = desktop_get_work_area,
+	.popup_state_changed = desktop_popup_state_changed,
 	.struct_size = sizeof(struct weston_desktop_api),
 	.surface_added = desktop_surface_added,
 	.surface_removed = desktop_surface_removed,
@@ -4000,6 +4020,8 @@ shell_backend_request_window_activate(void *shell_context, struct weston_seat *s
 	struct desktop_shell *shell = (struct desktop_shell *)shell_context;
 	struct weston_view *view;
 	struct shell_surface *shsurf;
+
+	weston_seat_dismiss_popup_grab(seat, surface);
 
 	if (!surface) {
 		/* Here, focus is moving to a window in client side, thus none of Linux app has focus,
@@ -4751,6 +4773,13 @@ shell_backend_set_desktop_workarea(struct weston_output *output, void *context, 
 
 		shell_output->desktop_workarea = *workarea;
 		shell_for_each_layer(shell, shell_workarea_changed_layer, (void*)&workarea_change);
+		struct weston_view *view;
+		wl_list_for_each(view, &shell->compositor->view_list, link) {
+			struct weston_desktop_surface *ds =
+				weston_surface_get_desktop_surface(view->surface);
+			if (ds)
+				weston_desktop_surface_update_popup_positions(ds);
+		}
 	}
 }
 
