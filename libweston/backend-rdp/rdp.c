@@ -52,6 +52,11 @@
 #include <winpr/ssl.h>
 #endif
 
+#if FREERDP_VERSION_MAJOR >= 3
+#include <freerdp/crypto/certificate.h>
+#include <freerdp/crypto/privatekey.h>
+#endif
+
 #include "shared/timespec-util.h"
 #include <libweston/libweston.h>
 #include <libweston/backend-rdp.h>
@@ -736,9 +741,17 @@ rdp_peer_context_new(freerdp_peer* client, RdpPeerContext* context)
 	if (!context->rfx_context)
 		return FALSE;
 
+#if FREERDP_VERSION_MAJOR >= 3
+	/* RFX_CONTEXT is an opaque type since FreeRDP 3; use the accessors. */
+	rfx_context_set_mode(context->rfx_context, RLGR3);
+	rfx_context_reset(context->rfx_context,
+			  client->context->settings->DesktopWidth,
+			  client->context->settings->DesktopHeight);
+#else
 	context->rfx_context->mode = RLGR3;
 	context->rfx_context->width = client->context->settings->DesktopWidth;
 	context->rfx_context->height = client->context->settings->DesktopHeight;
+#endif
 	rfx_context_set_pixel_format(context->rfx_context, DEFAULT_PIXEL_FORMAT);
 
 	context->nsc_context = nsc_context_new();
@@ -1657,7 +1670,11 @@ xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
 			if (flags & KBD_FLAGS_EXTENDED)
 				vk_code |= KBDEXT;
 
+#if FREERDP_VERSION_MAJOR >= 3
+		scan_code = GetKeycodeFromVirtualKeyCode(vk_code, WINPR_KEYCODE_TYPE_EVDEV);
+#else
 		scan_code = GetKeycodeFromVirtualKeyCode(vk_code, KEYCODE_TYPE_EVDEV);
+#endif
 		/*weston_log("code=%x ext=%d vk_code=%x scan_code=%x\n", code, (flags & KBD_FLAGS_EXTENDED) ? 1 : 0,
 				vk_code, scan_code);*/
 
@@ -1826,6 +1843,65 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 
 	settings = client->context->settings;
 	/* configure security settings */
+#if FREERDP_VERSION_MAJOR >= 3
+	/*
+	 * FreeRDP 3 dropped the *File / *Content string settings in favour of
+	 * rdpPrivateKey / rdpCertificate objects. freerdp_settings_set_pointer_len()
+	 * takes ownership of the object we hand over.
+	 */
+	if (b->rdp_key) {
+		rdpPrivateKey *key = freerdp_key_new_from_file(b->rdp_key);
+
+		if (!key) {
+			rdp_debug_error(b, "failed to load RDP key from %s\n", b->rdp_key);
+			goto error_initialize;
+		}
+		if (!freerdp_settings_set_pointer_len(settings,
+						      FreeRDP_RdpServerRsaKey,
+						      key, 1)) {
+			freerdp_key_free(key);
+			rdp_debug_error(b, "failed to set RDP server RSA key\n");
+			goto error_initialize;
+		}
+	}
+	if (is_tls_enabled(b)) {
+		rdpPrivateKey *tls_key;
+		rdpCertificate *tls_cert;
+
+		if (using_session_tls(b)) {
+			tls_cert = freerdp_certificate_new_from_pem(b->server_cert_content);
+			tls_key = freerdp_key_new_from_pem(b->server_key_content);
+		} else {
+			tls_cert = freerdp_certificate_new_from_file(b->server_cert);
+			tls_key = freerdp_key_new_from_file(b->server_key);
+		}
+		if (!tls_cert || !tls_key) {
+			if (tls_cert)
+				freerdp_certificate_free(tls_cert);
+			if (tls_key)
+				freerdp_key_free(tls_key);
+			rdp_debug_error(b, "failed to load TLS certificate/key\n");
+			goto error_initialize;
+		}
+		if (!freerdp_settings_set_pointer_len(settings,
+						      FreeRDP_RdpServerCertificate,
+						      tls_cert, 1)) {
+			freerdp_certificate_free(tls_cert);
+			freerdp_key_free(tls_key);
+			rdp_debug_error(b, "failed to set TLS certificate\n");
+			goto error_initialize;
+		}
+		if (!freerdp_settings_set_pointer_len(settings,
+						      FreeRDP_RdpServerRsaKey,
+						      tls_key, 1)) {
+			freerdp_key_free(tls_key);
+			rdp_debug_error(b, "failed to set TLS private key\n");
+			goto error_initialize;
+		}
+	} else {
+		settings->TlsSecurity = FALSE;
+	}
+#else
 	if (b->rdp_key)
 		settings->RdpKeyFile = strdup(b->rdp_key);
 	if (is_tls_enabled(b)) {
@@ -1839,6 +1915,7 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 	} else {
 		settings->TlsSecurity = FALSE;
 	}
+#endif
 	settings->NlaSecurity = FALSE;
 
 	if (!client->Initialize(client)) {

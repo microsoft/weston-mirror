@@ -41,6 +41,35 @@
 #include "rdpaudio.h"
 #include <libweston/libweston.h>
 #include <shared/xalloc.h>
+#include <freerdp/version.h>
+
+/*
+ * FreeRDP 3 replaced the high level audin server API (SelectFormat /
+ * ReceiveSamples / Opening / OpenResult and the server_formats,
+ * frames_per_packet, dst_format fields) with a raw SNDIN_* PDU interface.
+ * That port has not been done yet, so microphone redirection is compiled out
+ * against FreeRDP 3. Everything else (audio output, RAIL, clipboard) is
+ * unaffected.
+ */
+#if FREERDP_VERSION_MAJOR >= 3
+
+void *
+rdp_audio_in_init(struct weston_compositor *c, HANDLE vcm)
+{
+	(void)c;
+	(void)vcm;
+	weston_log("RDPAudioIn - not supported against FreeRDP 3, audio input disabled.\n");
+	return NULL;
+}
+
+void
+rdp_audio_in_destroy(void *audio_in_private)
+{
+	(void)audio_in_private;
+}
+
+#else
+
 
 static AUDIO_FORMAT rdp_audioin_supported_audio_formats[] = {
 		{ WAVE_FORMAT_PCM, 1, 44100, 88200, 2, 16, 0, NULL },
@@ -578,3 +607,5 @@ rdp_audio_in_destroy(void *audio_in_private)
 	}
 	free(priv);
 }
+
+#endif /* FREERDP_VERSION_MAJOR >= 3 */
