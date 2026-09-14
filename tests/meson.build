@@ -193,6 +193,11 @@ tests = [
 tests_standalone = [
 	['config-parser', [], [ dep_zucmain ]],
 	['matrix', [], [ dep_libm, dep_matrix_c ]],
+	[
+		'rdpclip-fd',
+		['../libweston/backend-rdp/rdpclip-fd.c'],
+		[ dep_zucmain ],
+	],
 	['timespec', [], [ dep_zucmain ]],
 	['zuc',
 		[
