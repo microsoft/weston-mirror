@@ -72,6 +72,8 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 	bool disable_ac = false;
 	struct weston_config *config = wet_get_config(wxw->compositor);
 	struct weston_config_section *section;
+	char *wayland_allow_byte_swapped_clients_env;
+	int32_t wayland_allow_byte_swapped_clients = 0;
 
 	if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv) < 0) {
 		weston_log("wl connection socketpair failed\n");
@@ -119,6 +121,10 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 		weston_config_section_get_bool(section, "disable_access_control", 
 						&disable_ac, false);
 
+		wayland_allow_byte_swapped_clients_env = getenv("WAYLAND_ALLOW_BYTE_SWAPPED_CLIENTS");
+		if (wayland_allow_byte_swapped_clients_env && (strcmp(wayland_allow_byte_swapped_clients_env, "true") == 0))
+			wayland_allow_byte_swapped_clients = 1;
+
 		/* Ignore SIGUSR1 in the child, which will make the X
 		 * server send SIGUSR1 to the parent (weston) when
 		 * it's done with initialization.  During
@@ -129,7 +135,7 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 		signal(SIGUSR1, SIG_IGN);
 
 		// Build our parameters
-		#define ARGS_COUNT 13
+		#define ARGS_COUNT 14
 		const char *argv[ARGS_COUNT] = {
 			xserver,				// 0
 			display,				// 1
@@ -139,8 +145,9 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 			"-wm", wm_fd_str,		// 6, 7
 			"-terminate",			// 8
 			NULL, NULL, 			// 9, 10 (-listen, abstract_fd_str)
-			NULL, 					// 11 (-ac)
-			NULL					// 12
+			NULL,					// 11 (+/-byteswappedclients)
+			NULL, 					// 12 (-ac)
+			NULL					// 13
 		};
 
 		int argc = 9;
@@ -150,6 +157,12 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 		} else {
 			argv[argc++] = "-nolisten";
 			argv[argc++] = "local";
+		}
+
+		if (wayland_allow_byte_swapped_clients_env) {
+			argv[argc++] = "+byteswappedclients";
+		} else {
+			argv[argc++] = "-byteswappedclients";
 		}
 
 		if (disable_ac) {
