@@ -185,8 +185,17 @@ data_source_send(struct weston_data_source *base,
 }
 
 static void
-data_source_cancel(struct weston_data_source *source)
+data_source_cancel(struct weston_data_source *base)
 {
+	struct x11_data_source *source = (struct x11_data_source *) base;
+	char **mime_type;
+
+	wl_signal_emit(&source->base.destroy_signal, &source->base);
+
+	wl_array_for_each(mime_type, &source->base.mime_types)
+		free(*mime_type);
+	wl_array_release(&source->base.mime_types);
+	free(source);
 }
 
 static void
@@ -320,24 +329,34 @@ weston_wm_handle_selection_notify(struct weston_wm *wm,
 static const size_t incr_chunk_size = 64 * 1024;
 
 static void
-weston_wm_send_selection_notify(struct weston_wm *wm, xcb_atom_t property)
+weston_wm_send_selection_notify_for_request(
+	struct weston_wm *wm,
+	const xcb_selection_request_event_t *selection_request,
+	xcb_atom_t property)
 {
 	xcb_selection_notify_event_t selection_notify;
 
 	memset(&selection_notify, 0, sizeof selection_notify);
 	selection_notify.response_type = XCB_SELECTION_NOTIFY;
 	selection_notify.sequence = 0;
-	selection_notify.time = wm->selection_request.time;
-	selection_notify.requestor = wm->selection_request.requestor;
-	selection_notify.selection = wm->selection_request.selection;
-	selection_notify.target = wm->selection_request.target;
+	selection_notify.time = selection_request->time;
+	selection_notify.requestor = selection_request->requestor;
+	selection_notify.selection = selection_request->selection;
+	selection_notify.target = selection_request->target;
 	selection_notify.property = property;
 
 	xcb_send_event(wm->conn, 0, /* propagate */
-		       wm->selection_request.requestor,
+		       selection_request->requestor,
 		       XCB_EVENT_MASK_NO_EVENT, (char *) &selection_notify);
 
 	xcb_flush(wm->conn);
+}
+
+static void
+weston_wm_send_selection_notify(struct weston_wm *wm, xcb_atom_t property)
+{
+	weston_wm_send_selection_notify_for_request(
+		wm, &wm->selection_request, property);
 }
 
 static void
@@ -607,7 +626,17 @@ weston_wm_handle_selection_request(struct weston_wm *wm,
 	weston_log_continue("property %s\n",
 		get_atom_name(wm->conn, selection_request->property));
 
-	assert(selection_request->requestor != wm->selection_window);
+	if (selection_request->requestor == wm->selection_window) {
+		weston_log("rejecting selection request from our own window\n");
+		weston_wm_send_selection_notify_for_request(
+			wm, selection_request, XCB_ATOM_NONE);
+		if (wm->data_source_fd >= 0) {
+			close(wm->data_source_fd);
+			wm->data_source_fd = -1;
+		}
+		return;
+	}
+
 	wm->selection_request = *selection_request;
 	wm->incr = 0;
 	wm->flush_property_on_delete = 0;
