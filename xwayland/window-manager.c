@@ -2893,6 +2893,33 @@ weston_wm_get_resources(struct weston_wm *wm)
 	free(formats_reply);
 }
 
+/* A decorated X11 window's frame sits inside a transparent margin that holds
+ * its drop shadow (theme->margin, 32 px). The surface includes that margin,
+ * and the RDP backend sends it to the client as part of the window by
+ * default, so a window manager on the client (e.g. a Windows tiling WM) that
+ * sizes the window to a tile leaves the visible frame that far inside the
+ * tile on every side.
+ * WESTON_XWM_SHADOW_MARGIN overrides the margin in pixels; 0 draws frames
+ * without a shadow, so the window is exactly the frame. Resizing with the
+ * pointer then happens on the frame's own border. */
+static void
+weston_wm_apply_shadow_margin(struct theme *t)
+{
+	const char *s = getenv("WESTON_XWM_SHADOW_MARGIN");
+	char *end;
+	long margin;
+
+	if (!s || !*s)
+		return;
+	margin = strtol(s, &end, 10);
+	if (*end || margin < 0 || margin > 64) {
+		weston_log("XWM: ignoring WESTON_XWM_SHADOW_MARGIN=%s (0..64)\n", s);
+		return;
+	}
+	t->margin = margin;
+	weston_log("XWM: frame shadow margin %ld px (WESTON_XWM_SHADOW_MARGIN)\n", margin);
+}
+
 static void
 weston_wm_create_wm_window(struct weston_wm *wm)
 {
@@ -3001,6 +3028,7 @@ weston_wm_create(struct weston_xserver *wxs, int fd)
 					  XCB_COMPOSITE_REDIRECT_MANUAL);
 
 	wm->theme = theme_create();
+	weston_wm_apply_shadow_margin(wm->theme);
 
 	supported[0] = wm->atom.net_wm_moveresize;
 	supported[1] = wm->atom.net_wm_state;
