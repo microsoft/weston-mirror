@@ -3072,10 +3072,12 @@ shell_backend_request_window_move(struct weston_surface *surface, int x, int y, 
 	struct shell_surface *shsurf = get_shell_surface(surface);
 
 	view = get_default_view(surface);
-	if (!view)
+	/* Only shell surfaces (toplevels) can be moved this way; a request for
+	 * a popup would otherwise dereference a NULL shsurf below. */
+	if (!view || !shsurf)
 		return;
 
-	if (shsurf && shsurf->shell->is_localmove_pending) {
+	if (shsurf->shell->is_localmove_pending) {
 		shsurf->shell->is_localmove_pending = false;
 	}
 
