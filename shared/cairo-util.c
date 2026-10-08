@@ -504,9 +504,12 @@ theme_render_frame(struct theme *t,
 	if (flags & THEME_FRAME_MAXIMIZED)
 		margin = 0;
 	else {
-		render_shadow(cr, t->shadow,
-			      2, 2, width + 8, height + 8,
-			      64, 64);
+		/* No margin, no room for a shadow: it would only darken the
+		 * frame's rounded corners. */
+		if (t->margin > 0)
+			render_shadow(cr, t->shadow,
+				      2, 2, width + 8, height + 8,
+				      64, 64);
 		margin = t->margin;
 	}
 
