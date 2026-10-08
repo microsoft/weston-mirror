@@ -4879,7 +4879,8 @@ static struct wl_client *
 shell_backend_launch_shell_process(void *shell_context, char *exec_name)
 {
 	struct desktop_shell *shell = (struct desktop_shell *)shell_context;
-	return weston_client_start(shell->compositor, exec_name);
+	/* program plus arguments, already checked against the allowlist */
+	return weston_client_start_command(shell->compositor, exec_name);
 }
 
 static void

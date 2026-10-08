@@ -135,7 +135,7 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 			display,				// 1
 			"-rootless",			// 2
 			"-core",				// 3
-			"-listen", unix_fd_str,	// 4, 5
+			"-listenfd", unix_fd_str,	// 4, 5
 			"-wm", wm_fd_str,		// 6, 7
 			"-terminate",			// 8
 			NULL, NULL, 			// 9, 10 (-listen, abstract_fd_str)
@@ -145,7 +145,7 @@ spawn_xserver(void *user_data, const char *display, int abstract_fd, int unix_fd
 
 		int argc = 9;
 		if (abstract_fd) {
-			argv[argc++] = "-listen";
+			argv[argc++] = "-listenfd";
 			argv[argc++] = abstract_fd_str;
 		} else {
 			argv[argc++] = "-nolisten";

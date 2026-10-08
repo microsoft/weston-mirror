@@ -986,6 +986,16 @@ launch_input_method(struct text_backend *text_backend)
 	if (strcmp(text_backend->input_method.path, "") == 0)
 		return;
 
+	/* the on-screen keyboard is optional (not built for RDP); without
+	 * this check weston retried starting it five times per session */
+	if (access(text_backend->input_method.path, X_OK) != 0) {
+		weston_log("input method %s not installed, none started\n",
+			   text_backend->input_method.path);
+		free(text_backend->input_method.path);
+		text_backend->input_method.path = NULL;
+		return;
+	}
+
 	text_backend->input_method.client =
 		weston_client_start(text_backend->compositor,
 				    text_backend->input_method.path);

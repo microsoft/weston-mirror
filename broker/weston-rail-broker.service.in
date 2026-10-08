@@ -1,0 +1,17 @@
+[Unit]
+Description=weston-mirror RAIL session broker (RDP RemoteApp, one session per user)
+After=network-online.target systemd-logind.service cups.service
+Wants=network-online.target
+
+[Service]
+# extra names for the generated certificate, e.g.
+#   systemctl edit weston-rail-broker  ->  Environment=BROKER_ARGS=--name=rdp.example.org
+ExecStart=@sbindir@/weston-rail-broker $BROKER_ARGS
+Environment=HOME=/root
+Restart=on-failure
+# sessions run in their own PAM/logind sessions; do not kill them when the
+# broker restarts
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

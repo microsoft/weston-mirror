@@ -1,0 +1,46 @@
+# Veroeffentlichte RemoteApps fuer weston-mirror RAIL
+# Kopie nach /etc/weston-rail/apps.conf, wird bei jedem Start neu gelesen.
+#
+# Der Client startet ein Programm ueber seinen Namen:
+#   remoteapplicationprogram:s:||firefox
+# oder ueber den Programmpfad aus "command" (/usr/bin/firefox).
+# Alles, was hier nicht steht, wird abgelehnt.
+#
+#   name              Name, den der Client anfordert
+#   command           Programm mit festen Argumenten (ohne Shell, Anfuehrungs-
+#                     zeichen fuer Argumente mit Leerzeichen)
+#   client-arguments  true: Argumente aus der .rdp-Datei anhaengen
+#                     false (Standard): Argumente des Clients ignorieren
+#   title             Anzeigename im Arbeitsbereich (weston-rail-feed)
+#   icon              Symbol: Name aus dem Icon-Theme oder Pfad zu .png/.svg;
+#                     ohne Angabe aus der .desktop-Datei des Programms
+#
+# [workspace] beschreibt den Arbeitsbereich fuer weston-rail-feed:
+#   name                  Name, den die Clients anzeigen
+#   address               Server fuer die Verbindung (host[:port]); ohne
+#                         Angabe der Name, unter dem der Feed abgerufen wurde
+#   authentication-level  0 = Zertifikat nicht pruefen, 2 = pruefen
+#   rdp                   zusaetzliche Zeile fuer die .rdp-Dateien (mehrfach)
+
+[workspace]
+name=Linux-Anwendungen
+#address=desktop.example.org:3389
+authentication-level=0
+
+[app]
+name=firefox
+title=Firefox
+command=/usr/bin/firefox
+client-arguments=false
+
+[app]
+name=gedit
+title=Texteditor
+command=/usr/bin/gedit
+client-arguments=true
+
+[app]
+name=terminal
+title=Terminal
+command=/usr/local/bin/weston-terminal
+client-arguments=false

@@ -306,8 +306,8 @@ rdp_audio_setup_listener(void)
 	sink_socket_path = getenv("PULSE_AUDIO_RDP_SINK");
 	if (sink_socket_path == NULL || sink_socket_path[0] == '\0') {
 		close(fd);
-		weston_log("Environment variable PULSE_AUDIO_RDP_SINK not set.\n");
-		return -1;
+		/* -2: no sink configured, not an error worth two log lines */
+		return -2;
 	}
 
 	memset(&s, 0, sizeof(s));
@@ -660,7 +660,11 @@ rdp_audio_client_activated(RdpsndServerContext* context)
 		context->SetVolume(context, 0x7FFF, 0x7FFF);
 
 		priv->pulseAudioSinkListenerFd = rdp_audio_setup_listener();
-		if (priv->pulseAudioSinkListenerFd < 0) {
+		if (priv->pulseAudioSinkListenerFd == -2) {
+			priv->pulseAudioSinkListenerFd = -1;
+			weston_log("RDPAudio - no audio output: no PulseAudio RDP sink "
+				   "(PULSE_AUDIO_RDP_SINK not set)\n");
+		} else if (priv->pulseAudioSinkListenerFd < 0) {
 			weston_log("RDPAudio - Failed to create listener socket\n");
 		} else if (pthread_create(&priv->pulseAudioSinkThread, NULL, rdp_audio_pulse_audio_sink_thread, (void*)priv) < 0) {
 			weston_log("RDPAudio - Failed to start Pulse Audio Sink Thread. No audio will be available.\n");
@@ -795,5 +799,9 @@ rdp_audio_out_destroy(void *audio_out_private)
 		rdpsnd_server_context_free(priv->rdpsnd_server_context);
 		priv->rdpsnd_server_context = NULL;
 	}
+	/* registered per connection: without this a reconnect failed with
+	 * "debug scope named 'rdp-audio' is already registered" */
+	if (priv->debug)
+		weston_log_scope_destroy(priv->debug);
 	free(priv);
 }

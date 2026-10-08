@@ -1,0 +1,4 @@
+# PAM configuration for weston-rail-broker (RDP RemoteApp sessions)
+@include common-auth
+@include common-account
+@include common-session

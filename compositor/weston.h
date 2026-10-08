@@ -55,6 +55,10 @@ weston_client_launch(struct weston_compositor *compositor,
 struct wl_client *
 weston_client_start(struct weston_compositor *compositor, const char *path);
 
+struct wl_client *
+weston_client_start_command(struct weston_compositor *compositor,
+			    const char *command);
+
 void
 weston_watch_process(struct weston_process *process);
 

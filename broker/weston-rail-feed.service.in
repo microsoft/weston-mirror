@@ -1,0 +1,12 @@
+[Unit]
+Description=weston-mirror RAIL workspace feed (RemoteApp and Desktop Connections, Windows App)
+After=network-online.target weston-rail-broker.service
+Wants=network-online.target
+
+[Service]
+# e.g. a trusted certificate: Environment="FEED_ARGS=--cert=/etc/letsencrypt/live/x/fullchain.pem --key=..."
+ExecStart=@sbindir@/weston-rail-feed $FEED_ARGS
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

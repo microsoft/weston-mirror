@@ -1,0 +1,23 @@
+#!/bin/sh
+# CUPS filter: PDF -> XPS for printers on RDP clients (weston-mirror RAIL).
+# Arguments per CUPS: job-id user title copies options [file]
+set -u
+TMP="${TMPDIR:-/tmp}"
+in=$(mktemp "$TMP/rdpxps-in.XXXXXX") || exit 1
+out=$(mktemp "$TMP/rdpxps-out.XXXXXX") || { rm -f "$in"; exit 1; }
+trap 'rm -f "$in" "$out"' EXIT INT TERM
+
+if [ $# -ge 6 ] && [ -n "$6" ]; then
+	cp "$6" "$in" || exit 1
+else
+	cat > "$in" || exit 1
+fi
+
+echo "INFO: PDF wird nach XPS gewandelt" >&2
+# xpswrite writes a zip package and needs a seekable output file
+if ! gs -q -dSAFER -dBATCH -dNOPAUSE -sDEVICE=xpswrite \
+	-sOutputFile="$out" "$in" >&2; then
+	echo "ERROR: Ghostscript (xpswrite) fehlgeschlagen" >&2
+	exit 1
+fi
+cat "$out"

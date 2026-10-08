@@ -1,3 +1,7 @@
+> **Dieser Fork:** RemoteApp-Server (RAIL) unter Debian 13 – Build, Installation
+> und Stand siehe **[README-RAIL.md](README-RAIL.md)**.
+> Kurz: `./scripts/install-deps.sh && ./build.sh`
+
 Weston
 ======
 

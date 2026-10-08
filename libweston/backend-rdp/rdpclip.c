@@ -37,6 +37,56 @@
 
 #include "rdp.h"
 
+/*
+ * FreeRDP 3 moved the shared CLIPRDR message header fields (msgType, msgFlags,
+ * dataLen) into a nested "common" member. Keep both APIs buildable.
+ */
+#if FREERDP_VERSION_MAJOR >= 3
+#define CLIPRDR_COMMON common.
+#else
+#define CLIPRDR_COMMON
+#endif
+
+/*
+ * WinPR 3 deprecated MultiByteToWideChar()/WideCharToMultiByte() and no longer
+ * exports them. Map the two call shapes we use onto the replacement API.
+ * Return value semantics (0 on error, otherwise number of characters/bytes,
+ * including the NUL when cbMultiByte/cchWideChar covers it) are preserved.
+ */
+#if FREERDP_VERSION_MAJOR >= 3
+static inline int
+weston_MultiByteToWideChar(UINT cp, DWORD flags, LPCSTR mb, int cbMultiByte,
+			   LPWSTR wc, int cchWideChar)
+{
+	SSIZE_T rc;
+
+	(void)cp;
+	(void)flags;
+	rc = ConvertUtf8NToWChar(mb, (size_t)cbMultiByte, wc,
+				 (size_t)(wc ? cchWideChar : 0));
+	return rc < 0 ? 0 : (int)rc;
+}
+
+static inline int
+weston_WideCharToMultiByte(UINT cp, DWORD flags, LPCWSTR wc, int cchWideChar,
+			   LPSTR mb, int cbMultiByte, LPCSTR def, LPBOOL used)
+{
+	SSIZE_T rc;
+
+	(void)cp;
+	(void)flags;
+	(void)def;
+	(void)used;
+	rc = ConvertWCharNToUtf8(wc, (size_t)cchWideChar, mb,
+				 (size_t)(mb ? cbMultiByte : 0));
+	return rc < 0 ? 0 : (int)rc;
+}
+
+#define MultiByteToWideChar weston_MultiByteToWideChar
+#define WideCharToMultiByte weston_WideCharToMultiByte
+#endif
+
+
 #include "libweston-internal.h"
 
 /* From MSDN, RegisterClipboardFormat API.
@@ -791,9 +841,9 @@ clipboard_client_send_format_data_response(RdpPeerContext *ctx, struct rdp_clipb
 			    clipboard_supported_formats[source->format_index].mime_type,
 			    source->processed_data_size);
 
-	formatDataResponse.msgType = CB_FORMAT_DATA_RESPONSE;
-	formatDataResponse.msgFlags = CB_RESPONSE_OK;
-	formatDataResponse.dataLen = source->processed_data_size;
+	formatDataResponse.CLIPRDR_COMMON msgType = CB_FORMAT_DATA_RESPONSE;
+	formatDataResponse.CLIPRDR_COMMON msgFlags = CB_RESPONSE_OK;
+	formatDataResponse.CLIPRDR_COMMON dataLen = source->processed_data_size;
 	formatDataResponse.requestedFormatData = source->processed_data_start;
 	ctx->clipboard_server_context->ServerFormatDataResponse(ctx->clipboard_server_context, &formatDataResponse);
 	/* if here failed to send response, what can we do ? */
@@ -815,9 +865,9 @@ clipboard_client_send_format_data_response_fail(RdpPeerContext *ctx, struct rdp_
 		source->data_response_fail_count++;
 	}
 
-	formatDataResponse.msgType = CB_FORMAT_DATA_RESPONSE;
-	formatDataResponse.msgFlags = CB_RESPONSE_FAIL;
-	formatDataResponse.dataLen = 0;
+	formatDataResponse.CLIPRDR_COMMON msgType = CB_FORMAT_DATA_RESPONSE;
+	formatDataResponse.CLIPRDR_COMMON msgFlags = CB_RESPONSE_FAIL;
+	formatDataResponse.CLIPRDR_COMMON dataLen = 0;
 	formatDataResponse.requestedFormatData = NULL;
 	ctx->clipboard_server_context->ServerFormatDataResponse(ctx->clipboard_server_context, &formatDataResponse);
 	/* if here failed to send response, what can we do ? */
@@ -1166,8 +1216,8 @@ clipboard_data_source_send(struct weston_data_source *base,
 			/* update requesting format property */
 			source->format_index = index;
 			/* request clipboard data from client */
-			formatDataRequest.msgType = CB_FORMAT_DATA_REQUEST;
-			formatDataRequest.dataLen = 4;
+			formatDataRequest.CLIPRDR_COMMON msgType = CB_FORMAT_DATA_REQUEST;
+			formatDataRequest.CLIPRDR_COMMON dataLen = 4;
 			formatDataRequest.requestedFormatId = source->client_format_id_table[index];
 			source->state = RDP_CLIPBOARD_SOURCE_REQUEST_DATA;
 			rdp_debug_clipboard(b, "RDP %s (%p:%s) request data \"%s\" index:%d formatId:%d %s\n",
@@ -1457,7 +1507,7 @@ clipboard_set_selection(struct wl_listener *listener, void *data)
 
 	if (num_supported_format) {
 		/* let client knows formats are available in server clipboard */
-		formatList.msgType = CB_FORMAT_LIST;
+		formatList.CLIPRDR_COMMON msgType = CB_FORMAT_LIST;
 		formatList.numFormats = num_supported_format;
 		formatList.formats = &format[0];
 		ctx->clipboard_server_context->ServerFormatList(ctx->clipboard_server_context, &formatList);
@@ -1595,9 +1645,9 @@ clipboard_client_format_list(CliprdrServerContext *context, const CLIPRDR_FORMAT
 	rdp_dispatch_task_to_display_loop(ctx, clipboard_data_source_publish, &source->task_base);
 
 fail:
-	formatListResponse.msgType = CB_FORMAT_LIST_RESPONSE;
-	formatListResponse.msgFlags = source ? CB_RESPONSE_OK : CB_RESPONSE_FAIL;
-	formatListResponse.dataLen = 0;
+	formatListResponse.CLIPRDR_COMMON msgType = CB_FORMAT_LIST_RESPONSE;
+	formatListResponse.CLIPRDR_COMMON msgFlags = source ? CB_RESPONSE_OK : CB_RESPONSE_FAIL;
+	formatListResponse.CLIPRDR_COMMON dataLen = 0;
 	if (ctx->clipboard_server_context->ServerFormatListResponse(ctx->clipboard_server_context, &formatListResponse) != 0) {
 		source->state = RDP_CLIPBOARD_SOURCE_FAILED;
 		weston_log("Client: %s (%p:%s) ServerFormatListResponse failed\n",
@@ -1623,8 +1673,8 @@ clipboard_client_format_data_response(CliprdrServerContext *context, const CLIPR
 	rdp_debug_clipboard(b, "Client: %s (%p:%s) flags:%d dataLen:%d\n",
 			    __func__, source,
 			    clipboard_data_source_state_to_string(source),
-			    formatDataResponse->msgFlags,
-			    formatDataResponse->dataLen);
+			    formatDataResponse->CLIPRDR_COMMON msgFlags,
+			    formatDataResponse->CLIPRDR_COMMON dataLen);
 
 	assert_not_compositor_thread(b);
 
@@ -1642,13 +1692,13 @@ clipboard_client_format_data_response(CliprdrServerContext *context, const CLIPR
 		return -1;
 	}
 
-	if (formatDataResponse->msgFlags == CB_RESPONSE_OK) {
+	if (formatDataResponse->CLIPRDR_COMMON msgFlags == CB_RESPONSE_OK) {
 		/* Recieved data from client, cache to data source */
-		if (wl_array_add(&source->data_contents, formatDataResponse->dataLen+1)) {
+		if (wl_array_add(&source->data_contents, formatDataResponse->CLIPRDR_COMMON dataLen+1)) {
 			memcpy(source->data_contents.data,
 			       formatDataResponse->requestedFormatData,
-			       formatDataResponse->dataLen);
-			source->data_contents.size = formatDataResponse->dataLen;
+			       formatDataResponse->CLIPRDR_COMMON dataLen);
+			source->data_contents.size = formatDataResponse->CLIPRDR_COMMON dataLen;
 			/* regardless data type, make sure it ends with NULL */
 			((char *)source->data_contents.data)[source->data_contents.size] = '\0';
 			/* data is ready, waiting to be written to destination */
@@ -1693,7 +1743,7 @@ clipboard_client_format_list_response(CliprdrServerContext *context,
 	RdpPeerContext *ctx = (RdpPeerContext *)client->context;
 	struct rdp_backend *b = ctx->rdpBackend;
 
-	rdp_debug_clipboard(b, "Client: %s msgFlags:0x%x\n", __func__, formatListResponse->msgFlags);
+	rdp_debug_clipboard(b, "Client: %s msgFlags:0x%x\n", __func__, formatListResponse->CLIPRDR_COMMON msgFlags);
 	assert_not_compositor_thread(b);
 	return 0;
 }

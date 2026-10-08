@@ -37,6 +37,8 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/eventfd.h>
+#include <sys/un.h>
+#include <sys/stat.h>
 #include <netdb.h>
 #include <linux/vm_sockets.h>
 #include <netinet/in.h>
@@ -50,6 +52,15 @@
 
 #if FREERDP_VERSION_MAJOR >= 2
 #include <winpr/ssl.h>
+#endif
+
+#if FREERDP_VERSION_MAJOR >= 3
+/* MS-RDPERP 2.2.1.1.2 wndSupportLevel; FreeRDP keeps these in a private header */
+#ifndef WINDOW_LEVEL_SUPPORTED_EX
+#define WINDOW_LEVEL_SUPPORTED_EX 0x00000002
+#endif
+#include <freerdp/crypto/certificate.h>
+#include <freerdp/crypto/privatekey.h>
 #endif
 
 #include "shared/timespec-util.h"
@@ -652,6 +663,17 @@ rdp_destroy(struct weston_compositor *ec)
 		if (b->listener_events[i])
 			wl_event_source_remove(b->listener_events[i]);
 
+	if (b->control_source)
+		wl_event_source_remove(b->control_source);
+	if (b->control_fd >= 0)
+		close(b->control_fd);
+	if (b->control_path) {
+		unlink(b->control_path);
+		free(b->control_path);
+	}
+	if (b->idle_exit_timer)
+		wl_event_source_remove(b->idle_exit_timer);
+
 	rdp_rail_destroy(b);
 
 	if (b->debugClipboard) {
@@ -731,14 +753,24 @@ rdp_peer_context_new(freerdp_peer* client, RdpPeerContext* context)
 	context->loop_task_event_source_fd = -1;
 	context->loop_task_event_source = NULL;
 	wl_list_init(&context->loop_task_list);
+	context->logoff_timer = NULL;
+	context->drives = NULL;
 
 	context->rfx_context = rfx_context_new(TRUE);
 	if (!context->rfx_context)
 		return FALSE;
 
+#if FREERDP_VERSION_MAJOR >= 3
+	/* RFX_CONTEXT is an opaque type since FreeRDP 3; use the accessors. */
+	rfx_context_set_mode(context->rfx_context, RLGR3);
+	rfx_context_reset(context->rfx_context,
+			  client->context->settings->DesktopWidth,
+			  client->context->settings->DesktopHeight);
+#else
 	context->rfx_context->mode = RLGR3;
 	context->rfx_context->width = client->context->settings->DesktopWidth;
 	context->rfx_context->height = client->context->settings->DesktopHeight;
+#endif
 	rfx_context_set_pixel_format(context->rfx_context, DEFAULT_PIXEL_FORMAT);
 
 	context->nsc_context = nsc_context_new();
@@ -790,6 +822,8 @@ rdp_peer_context_free(freerdp_peer* client, RdpPeerContext* context)
 
 	rdp_clipboard_destroy(context);
 
+	rdp_drives_destroy(context);
+
 	rdp_rail_peer_context_free(client, context);
 
 	rdp_drdynvc_destroy(context);
@@ -800,8 +834,10 @@ rdp_peer_context_free(freerdp_peer* client, RdpPeerContext* context)
 	rdp_destroy_dispatch_task_event_source(context);
 
 	/* clear the peer, in RAIL mode, this allows new peer to connect */
-	if (context->rdpBackend->rdp_peer == client)
+	if (context->rdpBackend->rdp_peer == client) {
 		context->rdpBackend->rdp_peer = NULL;
+		rdp_backend_schedule_idle_exit(context->rdpBackend);
+	}
 
 	if (context->item.flags & RDP_PEER_ACTIVATED) {
 		weston_seat_release_keyboard(context->item.seat);
@@ -825,6 +861,9 @@ rdp_peer_context_free(freerdp_peer* client, RdpPeerContext* context)
 	free(context->rfx_rects);
 }
 
+static BOOL xf_peer_activate_finish(freerdp_peer *client);
+static void xf_peer_activate_cleanup(freerdp_peer *client);
+
 static int
 rdp_client_activity(int fd, uint32_t mask, void *data)
 {
@@ -839,10 +878,34 @@ rdp_client_activity(int fd, uint32_t mask, void *data)
 
 	if (peerCtx && peerCtx->vcm)
 	{
+#if FREERDP_VERSION_MAJOR >= 3
+		/*
+		 * The plain variant auto-opens drdynvc, i.e. sends the CAPS request,
+		 * on the very first call - long before the client is activated and
+		 * able to process it. The request gets lost, the channel manager is
+		 * stuck in DRDYNVC_STATE_INITIALIZED and no dynamic channel ever
+		 * opens. Only auto-open once the peer is activated.
+		 */
+		if (!WTSVirtualChannelManagerCheckFileDescriptorEx(peerCtx->vcm, client->activated)) {
+#else
 		if (!WTSVirtualChannelManagerCheckFileDescriptor(peerCtx->vcm)) {
+#endif
 			rdp_debug_error(rdpBackend, "failed to check FreeRDP WTS VC file descriptor for %p\n", client);
 			goto out_clean;
         	}
+	}
+
+	if (peerCtx && peerCtx->activation_pending) {
+		if (WTSVirtualChannelManagerGetDrdynvcState(peerCtx->vcm) == DRDYNVC_STATE_READY) {
+			if (!xf_peer_activate_finish(client)) {
+				rdp_debug_error(rdpBackend, "deferred activation failed for %p\n", client);
+				goto out_clean;
+			}
+		} else if (time(NULL) > peerCtx->activation_deadline) {
+			rdp_debug_error(rdpBackend, "drdynvc not ready in time, closing %p\n", client);
+			xf_peer_activate_cleanup(client);
+			goto out_clean;
+		}
 	}
 
 	return 0;
@@ -1052,8 +1115,32 @@ convert_rdp_keyboard_to_xkb_rule_names(
 		xkbRuleNames->model, xkbRuleNames->layout, xkbRuleNames->variant, xkbRuleNames->options);
 }
 
+/* Undo what a (partial) activation set up. */
+static void
+xf_peer_activate_cleanup(freerdp_peer *client)
+{
+	RdpPeerContext *peerCtx = (RdpPeerContext *)client->context;
+	struct rdp_backend *b = peerCtx->rdpBackend;
+	rdpSettings *settings = client->context->settings;
+
+	rdp_clipboard_destroy(peerCtx);
+	if (settings->AudioPlayback && peerCtx->audio_out_private) {
+		b->audio_out_teardown(peerCtx->audio_out_private);
+		peerCtx->audio_out_private = NULL;
+	}
+	if (settings->AudioCapture && peerCtx->audio_in_private) {
+		b->audio_in_teardown(peerCtx->audio_in_private);
+		peerCtx->audio_in_private = NULL;
+	}
+	rdp_rail_peer_context_free(client, peerCtx);
+	rdp_drdynvc_destroy(peerCtx);
+
+}
+
+/* Second half of the activation: everything that needs the dynamic
+ * virtual channel to be READY (RAIL, audio) and the seat/output setup. */
 static BOOL
-xf_peer_activate(freerdp_peer* client)
+xf_peer_activate_finish(freerdp_peer* client)
 {
 	RdpPeerContext *peerCtx;
 	struct rdp_backend *b;
@@ -1074,61 +1161,13 @@ xf_peer_activate(freerdp_peer* client)
 	peersItem = &peerCtx->item;
 	settings = client->context->settings;
 
-	if (!settings->SurfaceCommandsEnabled) {
-		rdp_debug_error(b, "client doesn't support required SurfaceCommands\n");
-		return FALSE;
-	}
+	peerCtx->activation_pending = FALSE;
 
-	if (b->force_no_compression && settings->CompressionEnabled) {
-		rdp_debug_error(b, "Forcing compression off\n");
-		settings->CompressionEnabled = FALSE;
-	}
-
-	/* in RAIL mode, only one peer per backend can be activated */
-	if (settings->RemoteApplicationMode) {
-		if (b->rdp_peer != client) {
-			rdp_debug_error(b, "Another RAIL connection active, only one connection is allowed.\n");
-			return FALSE;
-		}
-
-		if (!settings->HiDefRemoteApp) {
-			/* HiDef is required for RAIL mode. Cookie-cutter window remoting is not supported. */
-			rdp_debug_error(b, "HiDef-RAIL is required for RAIL.\n");
-			return FALSE;
-		}
-
-		/* in HiDef RAIL mode, RAIL-shell must be used */
-		if (b->rdprail_shell_api == NULL) {
-			rdp_debug_error(b, "HiDef-RAIL is requested from client, but RAIL-shell is not used\n");
-			return FALSE;
-		}
-
-		/* do not wake up compositor yet, since in RAIL mode, there is no
-		   need to paint 'desktop', thus defer until window is created */
-	} else {
-		/* update RDP connection, wake up compositor to repaint 'desktop' */
-		weston_compositor_wake(b->compositor);
-		weston_compositor_damage_all(b->compositor);
-	}
-
-	/* override settings by env variables */
-	settings->RedirectClipboard = b->redirect_clipboard;
-	settings->AudioPlayback = b->audio_out_setup && b->audio_out_teardown;
-	settings->AudioCapture = b->audio_in_setup && b->audio_in_teardown;
-
-	if (settings->RemoteApplicationMode ||
+	if (!getenv("WESTON_RDP_WEB_SESSION") &&
+	    (settings->RemoteApplicationMode ||
 		settings->RedirectClipboard ||
 		settings->AudioPlayback ||
-		settings->AudioCapture) {
-
-		if (!peerCtx->vcm) {
-			rdp_debug_error(b, "Virtual channel is required for RAIL, clipboard, audio playback/capture\n");
-			goto error_exit;
-		}
-
-		/* RAIL, clipboard, Audio playback/capture requires dynamic virtual channel */
-		if (!rdp_drdynvc_init(client))
-			goto error_exit;
+		settings->AudioCapture)) {
 
 		if (settings->RemoteApplicationMode)
 			if (!rdp_rail_peer_activate(client))
@@ -1233,6 +1272,9 @@ xf_peer_activate(freerdp_peer* client)
 		if (rdp_clipboard_init(client) != 0)
 			goto error_exit;
 
+	/* drives and printers shared by the client (rdpdr) */
+	rdp_drives_init(peerCtx);
+
 	peersItem->flags |= RDP_PEER_ACTIVATED;
 
 	if (!settings->HiDefRemoteApp && output) {
@@ -1256,19 +1298,117 @@ xf_peer_activate(freerdp_peer* client)
 	return TRUE;
 
 error_exit:
+	xf_peer_activate_cleanup(client);
+	return FALSE;
+}
 
-	rdp_clipboard_destroy(peerCtx);
-	if (settings->AudioPlayback && peerCtx->audio_out_private) {
-		b->audio_out_teardown(peerCtx->audio_out_private);
-		peerCtx->audio_out_private = NULL;
-	}
-	if (settings->AudioCapture && peerCtx->audio_in_private) {
-		b->audio_in_teardown(peerCtx->audio_in_private);
-		peerCtx->audio_in_private = NULL;
-	}
-	rdp_rail_peer_context_free(client, peerCtx);
-	rdp_drdynvc_destroy(peerCtx);
+static BOOL
+xf_peer_activate(freerdp_peer* client)
+{
+	RdpPeerContext *peerCtx;
+	struct rdp_backend *b;
+	rdpSettings *settings;
 
+	peerCtx = (RdpPeerContext *)client->context;
+	b = peerCtx->rdpBackend;
+	settings = client->context->settings;
+
+	if (!settings->SurfaceCommandsEnabled) {
+		rdp_debug_error(b, "client doesn't support required SurfaceCommands\n");
+		return FALSE;
+	}
+
+	if (b->force_no_compression && settings->CompressionEnabled) {
+		rdp_debug_error(b, "Forcing compression off\n");
+		settings->CompressionEnabled = FALSE;
+	}
+
+	/*
+	 * In RAIL mode only one peer per backend can be active. A new
+	 * connection takes the session over, like reconnecting to a
+	 * disconnected session on Windows: the previous client is logged off,
+	 * the running applications stay alive and their windows are sent to
+	 * the new client (rdp_rail_sync_window_status()). This covers mstsc
+	 * opening a second connection for another RemoteApp as well as a
+	 * client reconnecting after a network drop while the server still
+	 * holds the stale connection.
+	 */
+	if (settings->RemoteApplicationMode) {
+		if (b->rdp_peer != client) {
+			freerdp_peer *previous = b->rdp_peer;
+
+			if (previous) {
+				weston_log("RDP RAIL: new connection takes over the session, "
+					   "disconnecting the previous client\n");
+				previous->Close(previous);
+				previous->Disconnect(previous);
+				/* frees the RAIL state and clears b->rdp_peer */
+				freerdp_peer_context_free(previous);
+				freerdp_peer_free(previous);
+			}
+			b->rdp_peer = client;
+		}
+
+		if (!settings->HiDefRemoteApp) {
+			/* HiDef is required for RAIL mode. Cookie-cutter window remoting is not supported. */
+			rdp_debug_error(b, "HiDef-RAIL is required for RAIL.\n");
+			return FALSE;
+		}
+
+		/* in HiDef RAIL mode, RAIL-shell must be used */
+		if (b->rdprail_shell_api == NULL) {
+			rdp_debug_error(b, "HiDef-RAIL is requested from client, but RAIL-shell is not used\n");
+			return FALSE;
+		}
+
+		/* do not wake up compositor yet, since in RAIL mode, there is no
+		   need to paint 'desktop', thus defer until window is created */
+	} else {
+		/* update RDP connection, wake up compositor to repaint 'desktop' */
+		weston_compositor_wake(b->compositor);
+		weston_compositor_damage_all(b->compositor);
+	}
+
+	/* override settings by env variables */
+	settings->RedirectClipboard = b->redirect_clipboard;
+	settings->AudioPlayback = b->audio_out_setup && b->audio_out_teardown;
+	settings->AudioCapture = b->audio_in_setup && b->audio_in_teardown;
+
+	if (!getenv("WESTON_RDP_WEB_SESSION") &&
+	    (settings->RemoteApplicationMode ||
+		settings->RedirectClipboard ||
+		settings->AudioPlayback ||
+		settings->AudioCapture)) {
+
+		if (!peerCtx->vcm) {
+			rdp_debug_error(b, "Virtual channel is required for RAIL, clipboard, audio playback/capture\n");
+			goto error_exit;
+		}
+
+		/* RAIL, clipboard, Audio playback/capture requires dynamic virtual channel */
+		if (!rdp_drdynvc_init(client))
+			goto error_exit;
+
+#if FREERDP_VERSION_MAJOR >= 3
+		/*
+		 * This callback runs inside FreeRDP's transport receive path, so
+		 * the client's drdynvc CAPS response cannot be read from here.
+		 * Return now and finish the activation from rdp_client_activity()
+		 * as soon as the channel manager reports DRDYNVC_STATE_READY.
+		 */
+		if (WTSVirtualChannelManagerGetDrdynvcState(peerCtx->vcm) != DRDYNVC_STATE_READY) {
+			peerCtx->activation_pending = TRUE;
+			peerCtx->activation_deadline = time(NULL) + 30;
+			rdp_debug(b, "activation deferred until drdynvc is ready\n");
+			return TRUE;
+		}
+#endif
+	}
+
+	return xf_peer_activate_finish(client);
+
+error_exit:
+	xf_peer_activate_cleanup(client);
 	return FALSE;
 }
 
@@ -1585,8 +1725,16 @@ xf_input_synchronize_event(rdpInput *input, UINT32 flags)
 	return TRUE;
 }
 
+/* FreeRDP 3 passes the scancode as UINT8 (pKeyboardEvent); gcc 14 rejects
+ * the mismatching function pointer as an error. */
+#if FREERDP_VERSION_MAJOR >= 3
+#define RDP_KBD_CODE_TYPE UINT8
+#else
+#define RDP_KBD_CODE_TYPE UINT16
+#endif
+
 static BOOL
-xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
+xf_input_keyboard_event(rdpInput *input, UINT16 flags, RDP_KBD_CODE_TYPE code)
 {
 	uint32_t scan_code, vk_code, full_code, keyboard_locale;
 	enum wl_keyboard_key_state keyState;
@@ -1603,6 +1751,19 @@ xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
 	if (!(peerContext->item.flags & RDP_PEER_ACTIVATED))
 		return TRUE;
 
+#if FREERDP_VERSION_MAJOR >= 3
+	/*
+	 * FreeRDP 3 passes the keyboard flags as sent on the wire: a key press
+	 * carries no KBD_FLAGS_DOWN (that flag means "was already down", i.e.
+	 * autorepeat). FreeRDP 2 synthesized KBD_FLAGS_DOWN for every press.
+	 * Checking for KBD_FLAGS_DOWN therefore dropped all key presses.
+	 */
+	if (flags & KBD_FLAGS_RELEASE)
+		keyState = WL_KEYBOARD_KEY_STATE_RELEASED;
+	else
+		keyState = WL_KEYBOARD_KEY_STATE_PRESSED;
+	notify = 1;
+#else
 	if (flags & KBD_FLAGS_DOWN) {
 		keyState = WL_KEYBOARD_KEY_STATE_PRESSED;
 		notify = 1;
@@ -1610,6 +1771,7 @@ xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
 		keyState = WL_KEYBOARD_KEY_STATE_RELEASED;
 		notify = 1;
 	}
+#endif
 
 	if (keyboard && notify) {
 		full_code = code;
@@ -1657,7 +1819,17 @@ xf_input_keyboard_event(rdpInput *input, UINT16 flags, UINT16 code)
 			if (flags & KBD_FLAGS_EXTENDED)
 				vk_code |= KBDEXT;
 
+#if FREERDP_VERSION_MAJOR >= 3
+		/*
+		 * The code below expects an XKB keycode (evdev + 8), which is what
+		 * KEYCODE_TYPE_EVDEV returned in WinPR 2. In WinPR 3 the EVDEV table
+		 * returns raw evdev codes and the XKB table the +8 variant, so XKB
+		 * is the equivalent here. Using EVDEV shifts every key by 8.
+		 */
+		scan_code = GetKeycodeFromVirtualKeyCode(vk_code, WINPR_KEYCODE_TYPE_XKB);
+#else
 		scan_code = GetKeycodeFromVirtualKeyCode(vk_code, KEYCODE_TYPE_EVDEV);
+#endif
 		/*weston_log("code=%x ext=%d vk_code=%x scan_code=%x\n", code, (flags & KBD_FLAGS_EXTENDED) ? 1 : 0,
 				vk_code, scan_code);*/
 
@@ -1826,6 +1998,65 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 
 	settings = client->context->settings;
 	/* configure security settings */
+#if FREERDP_VERSION_MAJOR >= 3
+	/*
+	 * FreeRDP 3 dropped the *File / *Content string settings in favour of
+	 * rdpPrivateKey / rdpCertificate objects. freerdp_settings_set_pointer_len()
+	 * takes ownership of the object we hand over.
+	 */
+	if (b->rdp_key) {
+		rdpPrivateKey *key = freerdp_key_new_from_file(b->rdp_key);
+
+		if (!key) {
+			rdp_debug_error(b, "failed to load RDP key from %s\n", b->rdp_key);
+			goto error_initialize;
+		}
+		if (!freerdp_settings_set_pointer_len(settings,
+						      FreeRDP_RdpServerRsaKey,
+						      key, 1)) {
+			freerdp_key_free(key);
+			rdp_debug_error(b, "failed to set RDP server RSA key\n");
+			goto error_initialize;
+		}
+	}
+	if (is_tls_enabled(b)) {
+		rdpPrivateKey *tls_key;
+		rdpCertificate *tls_cert;
+
+		if (using_session_tls(b)) {
+			tls_cert = freerdp_certificate_new_from_pem(b->server_cert_content);
+			tls_key = freerdp_key_new_from_pem(b->server_key_content);
+		} else {
+			tls_cert = freerdp_certificate_new_from_file(b->server_cert);
+			tls_key = freerdp_key_new_from_file(b->server_key);
+		}
+		if (!tls_cert || !tls_key) {
+			if (tls_cert)
+				freerdp_certificate_free(tls_cert);
+			if (tls_key)
+				freerdp_key_free(tls_key);
+			rdp_debug_error(b, "failed to load TLS certificate/key\n");
+			goto error_initialize;
+		}
+		if (!freerdp_settings_set_pointer_len(settings,
+						      FreeRDP_RdpServerCertificate,
+						      tls_cert, 1)) {
+			freerdp_certificate_free(tls_cert);
+			freerdp_key_free(tls_key);
+			rdp_debug_error(b, "failed to set TLS certificate\n");
+			goto error_initialize;
+		}
+		if (!freerdp_settings_set_pointer_len(settings,
+						      FreeRDP_RdpServerRsaKey,
+						      tls_key, 1)) {
+			freerdp_key_free(tls_key);
+			rdp_debug_error(b, "failed to set TLS private key\n");
+			goto error_initialize;
+		}
+	} else {
+		settings->TlsSecurity = FALSE;
+	}
+#else
 	if (b->rdp_key)
 		settings->RdpKeyFile = strdup(b->rdp_key);
 	if (is_tls_enabled(b)) {
@@ -1839,7 +2070,25 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 	} else {
 		settings->TlsSecurity = FALSE;
 	}
+#endif
 	settings->NlaSecurity = FALSE;
+	{
+		/* session broker: the broker leaves the user's own NT hash in
+		 * the private runtime directory, so the reconnect after the
+		 * redirection can use NLA as well */
+		const char *sam = getenv("WESTON_RDP_NLA_SAM");
+
+		if (sam && access(sam, R_OK) == 0 &&
+		    freerdp_settings_set_string(settings, FreeRDP_NtlmSamFile, sam)) {
+			settings->NlaSecurity = TRUE;
+			/* only NTLM here: after a Kerberos login at the broker the
+			 * client tries Kerberos first again, and without a keytab
+			 * WinPR aborts instead of falling back unless Kerberos is
+			 * excluded from the offered packages */
+			freerdp_settings_set_string(settings, FreeRDP_AuthenticationPackageList,
+						    "ntlm,!kerberos");
+		}
+	}
 
 	if (!client->Initialize(client)) {
 		rdp_debug_error(b, "peer initialization failed\n");
@@ -1854,16 +2103,38 @@ rdp_peer_init(freerdp_peer *client, struct rdp_backend *b)
 	settings->NSCodec = TRUE;
 	settings->FrameMarkerCommandEnabled = TRUE;
 	settings->SurfaceFrameMarkerEnabled = TRUE;
-	settings->RemoteApplicationMode = TRUE;
+	/* web sessions (weston-rail-web) run one program under kiosk-shell or
+	 * desktop-shell and speak ordinary RDP, which every client supports */
+	settings->RemoteApplicationMode = getenv("WESTON_RDP_WEB_SESSION") ? FALSE : TRUE;
 	settings->RemoteApplicationSupportLevel =
 		RAIL_LEVEL_SUPPORTED |
 		RAIL_LEVEL_SHELL_INTEGRATION_SUPPORTED |
 		RAIL_LEVEL_LANGUAGE_IME_SYNC_SUPPORTED |
 		RAIL_LEVEL_SERVER_TO_CLIENT_IME_SYNC_SUPPORTED |
 		RAIL_LEVEL_HANDSHAKE_EX_SUPPORTED;
+#if FREERDP_VERSION_MAJOR >= 3
+	/*
+	 * Window List capability set (MS-RDPERP 2.2.1.1.2). The client adopts the
+	 * level the server announces here, and FreeRDP 3 clients reject every
+	 * window order (incl. the monitored desktop ARC_BEGAN/ARC_COMPLETED that
+	 * triggers the app launch) unless it is at least WINDOW_LEVEL_SUPPORTED.
+	 * FreeRDP 2 defaulted to these values, FreeRDP 3 does not.
+	 */
+	settings->RemoteWndSupportLevel = WINDOW_LEVEL_SUPPORTED_EX;
+	settings->RemoteAppNumIconCaches = 3;
+	settings->RemoteAppNumIconCacheEntries = 12;
+#endif
 	settings->SupportGraphicsPipeline = TRUE;
 	settings->SupportMonitorLayoutPdu = TRUE;
 	settings->RedirectClipboard = TRUE;
+	if (!settings->RemoteApplicationMode) {
+		/* web session: clipboard and audio would make the activation
+		 * wait for the dynamic virtual channel, which simple clients
+		 * (guacd) never bring up; plain RDP drawing needs none of it */
+		settings->RedirectClipboard = FALSE;
+		settings->AudioPlayback = FALSE;
+		settings->AudioCapture = FALSE;
+	}
 	settings->HasExtendedMouseEvent = TRUE;
 	settings->HasHorizontalWheel = TRUE;
 
@@ -1951,6 +2222,9 @@ static BOOL
 rdp_incoming_peer(freerdp_listener *instance, freerdp_peer *client)
 {
 	struct rdp_backend *b = (struct rdp_backend *)instance->param4;
+
+	weston_log("RDP: incoming connection from %s%s\n", client->hostname,
+		   b->rdp_peer ? " (another RAIL session is still connected)" : "");
 	if (rdp_peer_init(client, b) < 0) {
 		rdp_debug_error(b, "error when treating incoming peer\n");
 		return FALSE;
@@ -2108,6 +2382,138 @@ static int use_vsock_fd(int port)
 
 extern char **environ; /* defined by libc */
 
+
+/* ---- session broker support ---------------------------------------- */
+
+static int
+rdp_idle_exit_timer(void *data)
+{
+	struct rdp_backend *b = data;
+
+	if (b->rdp_peer || !wl_list_empty(&b->exec_clients))
+		return 0;
+	weston_log("RDP: no client connected and no program running for %d s, "
+		   "ending the session\n", b->idle_exit_sec);
+	weston_compositor_exit(b->compositor);
+	return 0;
+}
+
+/* Called whenever the last client disconnected or the last program a
+ * client started ended. The timer re-checks both conditions. */
+void
+rdp_backend_schedule_idle_exit(struct rdp_backend *b)
+{
+	if (b->idle_exit_sec <= 0)
+		return;
+	if (!b->idle_exit_timer) {
+		struct wl_event_loop *loop =
+			wl_display_get_event_loop(b->compositor->wl_display);
+
+		b->idle_exit_timer = wl_event_loop_add_timer(loop, rdp_idle_exit_timer, b);
+		if (!b->idle_exit_timer)
+			return;
+	}
+	wl_event_source_timer_update(b->idle_exit_timer, b->idle_exit_sec * 1000);
+}
+
+/* The broker passes accepted RDP connections as file descriptors
+ * (SCM_RIGHTS), one per control connection. */
+static int
+rdp_control_activity(int fd, uint32_t mask, void *data)
+{
+	struct rdp_backend *b = data;
+	struct ucred cred;
+	socklen_t cl = sizeof cred;
+	char byte;
+	struct iovec iov = { .iov_base = &byte, .iov_len = 1 };
+	union {
+		struct cmsghdr hdr;
+		char buf[CMSG_SPACE(sizeof(int))];
+	} ctrl;
+	struct msghdr msg = {
+		.msg_iov = &iov, .msg_iovlen = 1,
+		.msg_control = ctrl.buf, .msg_controllen = sizeof ctrl.buf,
+	};
+	struct cmsghdr *cmsg;
+	int conn, peer_fd = -1;
+	ssize_t n;
+
+	conn = accept4(fd, NULL, NULL, SOCK_CLOEXEC);
+	if (conn < 0)
+		return 1;
+	if (getsockopt(conn, SOL_SOCKET, SO_PEERCRED, &cred, &cl) < 0 ||
+	    (cred.uid != 0 && cred.uid != getuid())) {
+		weston_log("RDP control: connection from uid %u refused\n",
+			   (unsigned)cred.uid);
+		close(conn);
+		return 1;
+	}
+	do {
+		n = recvmsg(conn, &msg, MSG_CMSG_CLOEXEC);
+	} while (n < 0 && errno == EINTR);
+	for (cmsg = CMSG_FIRSTHDR(&msg); n > 0 && cmsg; cmsg = CMSG_NXTHDR(&msg, cmsg)) {
+		if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
+		    cmsg->cmsg_len == CMSG_LEN(sizeof(int)))
+			memcpy(&peer_fd, CMSG_DATA(cmsg), sizeof(int));
+	}
+	if (peer_fd < 0) {
+		if (n == 1 && byte == 'S') {
+			/* status query from the session broker */
+			char reply[64];
+			int len = snprintf(reply, sizeof reply, "STATUS connected=%d apps=%d\n",
+					   b->rdp_peer ? 1 : 0, wl_list_length(&b->exec_clients));
+
+			n = write(conn, reply, len);
+			(void)n;
+		} else {
+			weston_log("RDP control: no connection received\n");
+		}
+		close(conn);
+		return 1;
+	}
+	/* acknowledge, so the broker knows the connection was taken over */
+	n = write(conn, "OK\n", 3);
+	(void)n;
+	close(conn);
+
+	weston_log("RDP control: connection handed over by the session broker\n");
+	if (rdp_peer_init(freerdp_peer_new(peer_fd), b) < 0) {
+		weston_log("RDP control: cannot initialize the connection\n");
+		close(peer_fd);
+	}
+	return 1;
+}
+
+static bool
+rdp_control_socket_create(struct rdp_backend *b, const char *path)
+{
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
+	struct wl_event_loop *loop;
+
+	if (strlen(path) >= sizeof addr.sun_path)
+		return false;
+	strcpy(addr.sun_path, path);
+	unlink(path);
+	b->control_fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+	if (b->control_fd < 0)
+		return false;
+	if (bind(b->control_fd, (struct sockaddr *)&addr, sizeof addr) < 0 ||
+	    listen(b->control_fd, 8) < 0) {
+		weston_log("RDP control: cannot listen on %s: %s\n", path, strerror(errno));
+		close(b->control_fd);
+		b->control_fd = -1;
+		return false;
+	}
+	chmod(path, 0600);
+	loop = wl_display_get_event_loop(b->compositor->wl_display);
+	b->control_source = wl_event_loop_add_fd(loop, b->control_fd, WL_EVENT_READABLE,
+						 rdp_control_activity, b);
+	b->control_path = strdup(path);
+	weston_log("RDP control: waiting for connections from the session broker on %s\n",
+		   path);
+	return true;
+}
+
 static struct rdp_backend *
 rdp_backend_create(struct weston_compositor *compositor,
 		   struct weston_rdp_backend_config *config)
@@ -2129,6 +2535,8 @@ rdp_backend_create(struct weston_compositor *compositor,
 
 	b->compositor_tid = rdp_get_tid();
 	b->compositor = compositor;
+	wl_list_init(&b->exec_clients);
+	b->control_fd = -1;
 	b->base.destroy = rdp_destroy;
 	b->base.create_output = rdp_output_create;
 	b->rdp_key = config->rdp_key ? strdup(config->rdp_key) : NULL;
@@ -2245,7 +2653,19 @@ rdp_backend_create(struct weston_compositor *compositor,
 
 	compositor->capabilities |= WESTON_CAP_ARBITRARY_MODES;
 
-	if (!config->env_socket) {
+	{
+		const char *idle = getenv("WESTON_RDP_IDLE_EXIT_SEC");
+
+		b->idle_exit_sec = idle ? atoi(idle) : 0;
+	}
+
+	if (getenv("WESTON_RDP_CONTROL_SOCKET")) {
+		/* session broker mode: no port of our own, connections arrive
+		 * through the control socket */
+		if (!rdp_control_socket_create(b, getenv("WESTON_RDP_CONTROL_SOCKET")))
+			goto err_output;
+		rdp_backend_schedule_idle_exit(b);
+	} else if (!config->env_socket) {
 		b->listener = freerdp_listener_new();
 		b->listener->PeerAccepted = rdp_incoming_peer;
 		b->listener->param4 = b;

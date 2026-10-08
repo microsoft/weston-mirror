@@ -380,7 +380,7 @@ sigchld_handler(int signal_number, void *data)
 }
 
 static void
-child_client_exec(int sockfd, const char *path)
+child_client_exec(int sockfd, char *const argv[])
 {
 	int clientfd;
 	char s[32];
@@ -407,16 +407,91 @@ child_client_exec(int sockfd, const char *path)
 	snprintf(s, sizeof s, "%d", clientfd);
 	setenv("WAYLAND_SOCKET", s, 1);
 
-	if (execl(path, path, NULL) < 0)
+	if (execv(argv[0], argv) < 0)
 		weston_log("compositor: executing '%s' failed: %s\n",
-			   path, strerror(errno));
+			   argv[0], strerror(errno));
 }
 
-WL_EXPORT struct wl_client *
-weston_client_launch(struct weston_compositor *compositor,
-		     struct weston_process *proc,
-		     const char *path,
-		     weston_process_cleanup_func_t cleanup)
+/*
+ * Split a command line into argv: whitespace separates, '...' and "..."
+ * quote, backslash escapes the next character. No shell is involved, so
+ * no expansion and no metacharacters. Returns NULL on unbalanced quotes.
+ * Free with free_argv().
+ */
+static char **
+split_command(const char *cmd)
+{
+	size_t len = strlen(cmd);
+	char **argv = zalloc((len / 2 + 2) * sizeof(char *));
+	char *buf = malloc(len + 1);
+	char *out;
+	int argc = 0;
+	char quote = 0;
+	bool in_arg = false;
+	const char *p;
+
+	if (!argv || !buf) {
+		free(argv);
+		free(buf);
+		return NULL;
+	}
+	out = buf;
+	for (p = cmd; *p; p++) {
+		char c = *p;
+
+		if (quote) {
+			if (c == quote)
+				quote = 0;
+			else if (c == '\\' && quote == '"' && p[1])
+				*out++ = *++p;
+			else
+				*out++ = c;
+			continue;
+		}
+		if (c == ' ' || c == '\t' || c == '\n') {
+			if (in_arg) {
+				*out++ = '\0';
+				in_arg = false;
+			}
+			continue;
+		}
+		if (!in_arg) {
+			argv[argc++] = out;
+			in_arg = true;
+		}
+		if (c == '\'' || c == '"')
+			quote = c;
+		else if (c == '\\' && p[1])
+			*out++ = *++p;
+		else
+			*out++ = c;
+	}
+	*out = '\0';
+	if (quote || argc == 0) {
+		free(buf);
+		free(argv);
+		return NULL;
+	}
+	/* argv[0] points to the start of buf, free_argv() relies on that */
+	argv[argc] = NULL;
+	return argv;
+}
+
+static void
+free_argv(char **argv)
+{
+	if (argv) {
+		free(argv[0]);
+		free(argv);
+	}
+}
+
+static struct wl_client *
+client_launch_argv(struct weston_compositor *compositor,
+		   struct weston_process *proc,
+		   const char *path,
+		   char *const argv[],
+		   weston_process_cleanup_func_t cleanup)
 {
 	int sv[2];
 	pid_t pid;
@@ -449,7 +524,7 @@ weston_client_launch(struct weston_compositor *compositor,
 		 * will cleanly shut down when the child exits.
 		 */
 		setsid();
-		child_client_exec(sv[1], path);
+		child_client_exec(sv[1], argv);
 		_exit(-1);
 	}
 
@@ -469,6 +544,17 @@ weston_client_launch(struct weston_compositor *compositor,
 	weston_watch_process(proc);
 
 	return client;
+}
+
+WL_EXPORT struct wl_client *
+weston_client_launch(struct weston_compositor *compositor,
+		     struct weston_process *proc,
+		     const char *path,
+		     weston_process_cleanup_func_t cleanup)
+{
+	char *argv[] = { (char *)path, NULL };
+
+	return client_launch_argv(compositor, proc, path, argv, cleanup);
 }
 
 WL_EXPORT void
@@ -535,6 +621,41 @@ out_free:
 	free(pinfo);
 
 	return NULL;
+}
+
+/* Like weston_client_start(), but with a command line: program plus
+ * arguments, split without a shell (see split_command()). */
+WL_EXPORT struct wl_client *
+weston_client_start_command(struct weston_compositor *compositor,
+			    const char *command)
+{
+	struct process_info *pinfo;
+	struct wl_client *client;
+	char **argv = split_command(command);
+
+	if (!argv) {
+		weston_log("compositor: cannot parse command '%s'\n", command);
+		return NULL;
+	}
+	pinfo = zalloc(sizeof *pinfo);
+	if (!pinfo) {
+		free_argv(argv);
+		return NULL;
+	}
+	pinfo->path = strdup(argv[0]);
+	if (!pinfo->path) {
+		free(pinfo);
+		free_argv(argv);
+		return NULL;
+	}
+	client = client_launch_argv(compositor, &pinfo->proc, command, argv,
+				    process_handle_sigchld);
+	free_argv(argv);
+	if (!client) {
+		free(pinfo->path);
+		free(pinfo);
+	}
+	return client;
 }
 
 static void
@@ -3300,6 +3421,35 @@ sigint_helper(int sig)
 	raise(SIGUSR2);
 }
 
+/*
+ * weston-rail-web: ein Programm in dieser Sitzung starten, sobald der
+ * erste Sitz existiert. Der Sitz entsteht mit der RDP-Verbindung;
+ * Programme, die vorher starten (GTK/Wayland, z. B. Firefox oder gedit),
+ * binden ihn nicht nach und bleiben ohne Tastatur und Maus.
+ */
+struct wet_autolaunch {
+	struct wl_listener seat_created;
+	struct weston_compositor *compositor;
+	const char *command;
+	bool done;
+};
+
+static struct wet_autolaunch autolaunch_state;
+
+static void
+wet_autolaunch_on_seat(struct wl_listener *listener, void *data)
+{
+	struct wet_autolaunch *al =
+		container_of(listener, struct wet_autolaunch, seat_created);
+
+	if (al->done)
+		return;
+	al->done = true;
+	weston_log("autolaunch: %s\n", al->command);
+	if (!weston_client_start_command(al->compositor, al->command))
+		weston_log("autolaunch failed\n");
+}
+
 WL_EXPORT int
 wet_main(int argc, char *argv[])
 {
@@ -3612,6 +3762,21 @@ wet_main(int argc, char *argv[])
 
 	/* Until RDP connection is established, keep compositor sleep state */
 	weston_compositor_sleep(wet.compositor);
+
+	{
+		const char *autolaunch = getenv("WESTON_AUTOLAUNCH");
+
+		if (autolaunch && *autolaunch) {
+			autolaunch_state.compositor = wet.compositor;
+			autolaunch_state.command = autolaunch;
+			autolaunch_state.seat_created.notify = wet_autolaunch_on_seat;
+			wl_signal_add(&wet.compositor->seat_created_signal,
+				      &autolaunch_state.seat_created);
+			/* falls schon ein Sitz existiert, sofort starten */
+			if (!wl_list_empty(&wet.compositor->seat_list))
+				wet_autolaunch_on_seat(&autolaunch_state.seat_created, NULL);
+		}
+	}
 
 	wl_display_run(display);
 

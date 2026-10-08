@@ -158,18 +158,290 @@ rail_client_Handshake(RailServerContext *context, const RAIL_HANDSHAKE_ORDER *ha
 	return CHANNEL_RC_OK;
 }
 
+/* Grace period before an idle session (no remote application left) is
+ * disconnected. Gives launcher scripts time to hand over to the real
+ * application, and matches the Windows RemoteApp behaviour of logging the
+ * session off once the last application is closed. */
+#define RDP_RAIL_IDLE_LOGOFF_MS 5000
+
+struct rdp_exec_client {
+	struct wl_list link;			/* rdp_backend::exec_clients */
+	struct wl_listener destroy_listener;
+	struct rdp_backend *b;
+};
+
+static void
+rdp_rail_count_window_iter(void *element, void *data)
+{
+	struct weston_surface *surface = element;
+	struct weston_surface_rail_state *rail_state = surface->backend_state;
+	uint32_t *count = data;
+
+	/* only count what the user can see: the shell's helper client also
+	 * owns (unmapped / zero sized) surfaces that get a window id */
+	if (rail_state && !rail_state->isCursor &&
+	    weston_surface_is_mapped(surface) &&
+	    surface->width > 0 && surface->height > 0)
+		(*count)++;
+}
+
+static int
+rdp_rail_idle_logoff_timer(void *data)
+{
+	RdpPeerContext *peer_ctx = data;
+	struct rdp_backend *b = peer_ctx->rdpBackend;
+	freerdp_peer *client = peer_ctx->_p.peer;
+	uint32_t windows = 0;
+
+	rdp_id_manager_for_each(&peer_ctx->windowId,
+				rdp_rail_count_window_iter, &windows);
+
+	if (windows || !wl_list_empty(&b->exec_clients)) {
+		rdp_debug(b, "idle logoff: still %u window(s), %s programs, keeping session\n",
+			  windows,
+			  wl_list_empty(&b->exec_clients) ? "no" : "running");
+		return 0;
+	}
+
+	weston_log("RDP RAIL: no remote application left, logging off client\n");
+	/* Deactivate All + disconnect ultimatum, then drop the socket; the
+	 * hang-up is picked up by rdp_client_activity(), which frees the peer
+	 * and thereby allows the next connection. */
+	client->Close(client);
+	client->Disconnect(client);
+	return 0;
+}
+
+static void
+rdp_rail_schedule_idle_logoff(RdpPeerContext *peer_ctx)
+{
+	struct rdp_backend *b = peer_ctx->rdpBackend;
+
+	if (!peer_ctx->logoff_timer) {
+		struct wl_event_loop *loop =
+			wl_display_get_event_loop(b->compositor->wl_display);
+
+		peer_ctx->logoff_timer =
+			wl_event_loop_add_timer(loop, rdp_rail_idle_logoff_timer,
+						peer_ctx);
+		if (!peer_ctx->logoff_timer)
+			return;
+	}
+	wl_event_source_timer_update(peer_ctx->logoff_timer,
+				     RDP_RAIL_IDLE_LOGOFF_MS);
+}
+
 static void
 rail_ClientExec_destroy(struct wl_listener *listener, void *data)
 {
-	RdpPeerContext *peer_ctx = container_of(listener, RdpPeerContext,
-						clientExec_destroy_listener);
-	struct rdp_backend *b = peer_ctx->rdpBackend;
+	struct rdp_exec_client *exec_client =
+		container_of(listener, struct rdp_exec_client, destroy_listener);
+	struct rdp_backend *b = exec_client->b;
 
 	rdp_debug(b, "Client ExecOrder program terminated\n");
 
-	wl_list_remove(&peer_ctx->clientExec_destroy_listener.link);
-	peer_ctx->clientExec_destroy_listener.notify = NULL;
-	peer_ctx->clientExec = NULL;
+	wl_list_remove(&exec_client->destroy_listener.link);
+	wl_list_remove(&exec_client->link);
+	free(exec_client);
+
+	if (b->rdp_peer && b->rdp_peer->context)
+		rdp_rail_schedule_idle_logoff((RdpPeerContext *)b->rdp_peer->context);
+	else
+		rdp_backend_schedule_idle_exit(b);
+}
+
+/*
+ * Allowlist of programs a client may start ("published RemoteApps").
+ *
+ * /etc/weston-rail/apps.conf (or $WESTON_RAIL_APPS_CONF), re-read on
+ * every request:
+ *
+ *   [app]
+ *   name=firefox
+ *   command=/usr/bin/firefox
+ *   client-arguments=false
+ *
+ * The client names the program as "||firefox" (Windows RemoteApp alias
+ * syntax), "firefox", or the executable path of an entry
+ * ("/usr/bin/firefox"). Arguments sent by the client are appended only
+ * with client-arguments=true, otherwise ignored. Everything else is
+ * rejected with RAIL_EXEC_E_NOT_IN_ALLOWLIST.
+ *
+ * WESTON_RAIL_ALLOW_ANY_PROGRAM=1 disables the check (testing only: the
+ * client can then start any program, e.g. a shell).
+ */
+#define RDP_RAIL_APPS_CONF "/etc/weston-rail/apps.conf"
+
+struct rail_app {
+	char name[128];
+	char command[2048];
+	bool client_arguments;
+};
+
+static char *
+rail_trim(char *str)
+{
+	char *end;
+
+	while (*str == ' ' || *str == '\t')
+		str++;
+	end = str + strlen(str);
+	while (end > str && (end[-1] == ' ' || end[-1] == '\t' ||
+			     end[-1] == '\r' || end[-1] == '\n'))
+		*--end = '\0';
+	return str;
+}
+
+static bool
+rail_parse_bool(const char *v)
+{
+	return !strcasecmp(v, "true") || !strcasecmp(v, "yes") ||
+	       !strcasecmp(v, "1") || !strcasecmp(v, "on");
+}
+
+/* returns the number of entries, -1 if the file cannot be read */
+static int
+rail_load_apps(const char *path, struct rail_app **apps_out)
+{
+	FILE *f = fopen(path, "re");
+	struct rail_app *apps = NULL, *cur = NULL;
+	char line[4096];
+	int n = 0, lineno = 0;
+
+	if (!f)
+		return -1;
+	while (fgets(line, sizeof line, f)) {
+		char *l = rail_trim(line), *eq, *key, *val;
+
+		lineno++;
+		if (!*l || *l == '#' || *l == ';')
+			continue;
+		if (!strcmp(l, "[app]")) {
+			apps = xrealloc(apps, (n + 1) * sizeof *apps);
+			cur = &apps[n++];
+			memset(cur, 0, sizeof *cur);
+			continue;
+		}
+		if (*l == '[') {	/* other sections are ignored */
+			cur = NULL;
+			continue;
+		}
+		eq = strchr(l, '=');
+		if (!eq || !cur) {
+			weston_log("RDP RAIL: %s:%d ignored\n", path, lineno);
+			continue;
+		}
+		*eq = '\0';
+		key = rail_trim(l);
+		val = rail_trim(eq + 1);
+		if (!strcmp(key, "name"))
+			snprintf(cur->name, sizeof cur->name, "%s", val);
+		else if (!strcmp(key, "command"))
+			snprintf(cur->command, sizeof cur->command, "%s", val);
+		else if (!strcmp(key, "client-arguments"))
+			cur->client_arguments = rail_parse_bool(val);
+	}
+	fclose(f);
+	*apps_out = apps;
+	return n;
+}
+
+/* first word of a command line (the executable), unquoted */
+static void
+rail_command_program(const char *command, char *out, size_t size)
+{
+	size_t i = 0;
+	char quote = 0;
+
+	while (*command == ' ' || *command == '\t')
+		command++;
+	if (*command == '"' || *command == '\'')
+		quote = *command++;
+	while (*command && i + 1 < size) {
+		if (quote ? *command == quote : (*command == ' ' || *command == '\t'))
+			break;
+		out[i++] = *command++;
+	}
+	out[i] = '\0';
+}
+
+static UINT
+rdp_rail_resolve_program(const char *program, const char *arguments,
+			 char **command_out)
+{
+	const char *conf = getenv("WESTON_RAIL_APPS_CONF");
+	const char *name = program;
+	struct rail_app *apps = NULL, *app = NULL;
+	char exe[PATH_MAX];
+	int n, i;
+
+	if (!conf || !*conf)
+		conf = RDP_RAIL_APPS_CONF;
+
+	if (getenv("WESTON_RAIL_ALLOW_ANY_PROGRAM")) {
+		weston_log("RDP RAIL: WARNING: allowlist disabled "
+			   "(WESTON_RAIL_ALLOW_ANY_PROGRAM), starting '%s'\n", program);
+		if (arguments && *arguments) {
+			if (asprintf(command_out, "%s %s", program, arguments) < 0)
+				return RAIL_EXEC_E_FAIL;
+		} else {
+			*command_out = xstrdup(program);
+		}
+		return RAIL_EXEC_S_OK;
+	}
+
+	if (!strncmp(name, "||", 2))
+		name += 2;
+
+	n = rail_load_apps(conf, &apps);
+	if (n < 0) {
+		weston_log("RDP RAIL: '%s' rejected: no allowlist %s "
+			   "(see README-RAIL.md)\n", program, conf);
+		return RAIL_EXEC_E_NOT_IN_ALLOWLIST;
+	}
+	for (i = 0; i < n && !app; i++) {
+		if (!apps[i].name[0] || !apps[i].command[0])
+			continue;
+		if (!strcasecmp(apps[i].name, name))
+			app = &apps[i];
+	}
+	/* also accept the executable path of an entry (.rdp files that name
+	 * the program directly) */
+	for (i = 0; i < n && !app; i++) {
+		if (!apps[i].command[0])
+			continue;
+		rail_command_program(apps[i].command, exe, sizeof exe);
+		if (exe[0] == '/' && !strcmp(exe, program))
+			app = &apps[i];
+	}
+	if (!app) {
+		weston_log("RDP RAIL: '%s' rejected: not in the allowlist %s\n",
+			   program, conf);
+		free(apps);
+		return RAIL_EXEC_E_NOT_IN_ALLOWLIST;
+	}
+
+	rail_command_program(app->command, exe, sizeof exe);
+	if (access(exe, X_OK) != 0) {
+		weston_log("RDP RAIL: '%s': %s is not executable\n", app->name, exe);
+		free(apps);
+		return RAIL_EXEC_E_FILE_NOT_FOUND;
+	}
+
+	if (arguments && *arguments && app->client_arguments) {
+		if (asprintf(command_out, "%s %s", app->command, arguments) < 0) {
+			free(apps);
+			return RAIL_EXEC_E_FAIL;
+		}
+	} else {
+		if (arguments && *arguments)
+			weston_log("RDP RAIL: '%s': client arguments ignored "
+				   "(client-arguments=false)\n", app->name);
+		*command_out = xstrdup(app->command);
+	}
+	weston_log("RDP RAIL: '%s' allowed, starting: %s\n", app->name, *command_out);
+	free(apps);
+	return RAIL_EXEC_S_OK;
 }
 
 static void
@@ -185,6 +457,11 @@ rail_client_Exec_callback(bool freeOnly, void *arg)
 	RAIL_EXEC_RESULT_ORDER orderResult = {};
 	char *remoteProgramAndArgs = exec->RemoteApplicationProgram;
 
+	weston_log("RDP RAIL: client requests program:%s args:%s workdir:%s (flags 0x%08X)\n",
+		   exec->RemoteApplicationProgram,
+		   exec->RemoteApplicationArguments,
+		   exec->RemoteApplicationWorkingDir,
+		   (UINT)exec->flags);
 	rdp_debug(b, "Client ExecOrder:0x%08X, Program:%s, WorkingDir:%s, RemoteApplicationArguments:%s\n",
 		  (UINT)exec->flags,
 		  exec->RemoteApplicationProgram,
@@ -198,15 +475,15 @@ rail_client_Exec_callback(bool freeOnly, void *arg)
 		if (!utf8_string_to_rail_string(exec->RemoteApplicationProgram, &orderResult.exeOrFile))
 			goto send_result;
 
-		if (exec->RemoteApplicationArguments) {
-			/* construct remote program path and arguments */
-			remoteProgramAndArgs = malloc(strlen(exec->RemoteApplicationProgram) +
-						      strlen(exec->RemoteApplicationArguments) +
-						      2); /* space between program and args + null terminate. */
-			if (!remoteProgramAndArgs)
-				goto send_result;
-			sprintf(remoteProgramAndArgs, "%s %s", exec->RemoteApplicationProgram, exec->RemoteApplicationArguments);
+		/* only published programs (allowlist), see rdp_rail_resolve_program() */
+		result = rdp_rail_resolve_program(exec->RemoteApplicationProgram,
+						  exec->RemoteApplicationArguments,
+						  &remoteProgramAndArgs);
+		if (result != RAIL_EXEC_S_OK) {
+			remoteProgramAndArgs = exec->RemoteApplicationProgram;
+			goto send_result;
 		}
+		result = RAIL_EXEC_E_FAIL;
 
 		/* TODO: server state machine, wait until activation complated */
 		while (!peer_ctx->activationRailCompleted)
@@ -214,16 +491,22 @@ rail_client_Exec_callback(bool freeOnly, void *arg)
 
 		/* launch the process specified by RDP client. */
 		rdp_debug(b, "Client ExecOrder launching %s\n", remoteProgramAndArgs);
+		struct wl_client *exec_wl_client = NULL;
+
 		if (api && api->request_launch_shell_process) {
-			peer_ctx->clientExec =
+			exec_wl_client =
 				api->request_launch_shell_process(b->rdprail_shell_context,
 								  remoteProgramAndArgs);
 		}
-		if (peer_ctx->clientExec) {
-			assert(!peer_ctx->clientExec_destroy_listener.notify);
-			peer_ctx->clientExec_destroy_listener.notify = rail_ClientExec_destroy;
-			wl_client_add_destroy_listener(peer_ctx->clientExec,
-						       &peer_ctx->clientExec_destroy_listener);
+		if (exec_wl_client) {
+			/* every exec order starts a new instance, track them all */
+			struct rdp_exec_client *exec_client = xzalloc(sizeof *exec_client);
+
+			exec_client->b = b;
+			exec_client->destroy_listener.notify = rail_ClientExec_destroy;
+			wl_client_add_destroy_listener(exec_wl_client,
+						       &exec_client->destroy_listener);
+			wl_list_insert(&b->exec_clients, &exec_client->link);
 			result = RAIL_EXEC_S_OK;
 		} else {
 			rdp_debug_error(b, "%s: fail to launch shell process %s\n",
@@ -1820,7 +2103,7 @@ rdp_rail_destroy_window(struct wl_listener *listener, void *data)
 	WINDOW_ORDER_INFO window_order_info = {};
 	POINTER_SYSTEM_UPDATE pointerSystem = {};
 	uint32_t window_id;
-	RdpPeerContext *peer_ctx;
+	RdpPeerContext *peer_ctx = NULL;
 
 	if (!rail_state)
 		return;
@@ -1918,6 +2201,11 @@ rdp_rail_destroy_window(struct wl_listener *listener, void *data)
 		wl_list_remove(&rail_state->destroy_listener.link);
 		rail_state->destroy_listener.notify = NULL;
 	}
+
+	/* listener is NULL during peer teardown; only react to windows the
+	 * application closed itself */
+	if (listener && peer_ctx && !rail_state->isCursor)
+		rdp_rail_schedule_idle_logoff(peer_ctx);
 
 Exit:
 	free(rail_state);
@@ -3139,9 +3427,13 @@ rdp_rail_sync_window_zorder(struct weston_compositor *compositor)
 		monitored_desktop_order.numWindowIds = iCurrent;
 		monitored_desktop_order.windowIds = windowIdArray;
 
+		/* FreeRDP 3 batches window orders; without a paint bracket they are
+		 * never flushed to the client. */
+		client->context->update->BeginPaint(client->context);
 		client->context->update->window->MonitoredDesktop(client->context,
 								  &window_order_info,
 								  &monitored_desktop_order);
+		client->context->update->EndPaint(client->context);
 		client->DrainOutputBuffer(client);
 	}
 
@@ -3157,7 +3449,11 @@ rdp_rail_output_repaint(struct weston_output *output,
 {
 	struct weston_compositor *ec = output->compositor;
 	struct rdp_backend *b = to_rdp_backend(ec);
-	RdpPeerContext *peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
+	RdpPeerContext *peer_ctx;
+
+	if (!b->rdp_peer || !b->rdp_peer->context)
+		return;
+	peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
 
 	if (peer_ctx->isAcknowledgedSuspended ||
 	    ((peer_ctx->currentFrameId - peer_ctx->acknowledgedFrameId) < 2)) {
@@ -3608,7 +3904,13 @@ static void
 rdp_rail_notify_window_zorder_change(struct weston_compositor *compositor)
 {
 	struct rdp_backend *b = to_rdp_backend(compositor);
-	RdpPeerContext *peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
+	RdpPeerContext *peer_ctx;
+
+	/* weston-mirror: applications keep running after the client
+	 * disconnected; their surfaces go away without a peer */
+	if (!b->rdp_peer || !b->rdp_peer->context)
+		return;
+	peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
 
 	assert_compositor_thread(b);
 
@@ -3647,7 +3949,10 @@ rdp_rail_sync_window_status(freerdp_peer *client)
 		client->DrainOutputBuffer(client);
 	}
 
-	{
+	/* MS-RDPERP: the Z-order sync PDU may only be sent to clients that
+	 * announced TS_RAIL_CLIENTSTATUS_ZORDER_SYNC. mstsc does, FreeRDP does
+	 * not, and FreeRDP drops the connection when it receives one anyway. */
+	if (peer_ctx->clientStatusFlags & TS_RAIL_CLIENTSTATUS_ZORDER_SYNC) {
 		RAIL_ZORDER_SYNC zOrderSync = {
 			.windowIdMarker = RDP_RAIL_MARKER_WINDOW_ID,
 		};
@@ -3664,9 +3969,13 @@ rdp_rail_sync_window_status(freerdp_peer *client)
 		};
 		MONITORED_DESKTOP_ORDER monitored_desktop_order = {};
 
+		/* FreeRDP 3 batches window orders; without a paint bracket they are
+		 * never flushed to the client. */
+		update->BeginPaint(update->context);
 		update->window->MonitoredDesktop(update->context,
 						 &window_order_info,
 						 &monitored_desktop_order);
+		update->EndPaint(update->context);
 		client->DrainOutputBuffer(client);
 	}
 
@@ -3685,9 +3994,13 @@ rdp_rail_sync_window_status(freerdp_peer *client)
 			.windowIds = (UINT *)&windowsIdArray,
 		};
 
+		/* FreeRDP 3 batches window orders; without a paint bracket they are
+		 * never flushed to the client. */
+		update->BeginPaint(update->context);
 		update->window->MonitoredDesktop(update->context,
 						 &window_order_info,
 						 &monitored_desktop_order);
+		update->EndPaint(update->context);
 		client->DrainOutputBuffer(client);
 	}
 
@@ -3699,9 +4012,13 @@ rdp_rail_sync_window_status(freerdp_peer *client)
 		};
 		MONITORED_DESKTOP_ORDER monitored_desktop_order = {};
 
+		/* FreeRDP 3 batches window orders; without a paint bracket they are
+		 * never flushed to the client. */
+		update->BeginPaint(update->context);
 		update->window->MonitoredDesktop(update->context,
 						 &window_order_info,
 						 &monitored_desktop_order);
+		update->EndPaint(update->context);
 		client->DrainOutputBuffer(client);
 	}
 
@@ -4033,9 +4350,9 @@ rdp_rail_peer_context_free(freerdp_peer *client, RdpPeerContext *context)
 		context->rail_server_context = NULL;
 	}
 
-	if (context->clientExec_destroy_listener.notify) {
-		wl_list_remove(&context->clientExec_destroy_listener.link);
-		context->clientExec_destroy_listener.notify = NULL;
+	if (context->logoff_timer) {
+		wl_event_source_remove(context->logoff_timer);
+		context->logoff_timer = NULL;
 	}
 
 	if (context->idle_listener.notify) {
@@ -4063,6 +4380,19 @@ rdp_drdynvc_init(freerdp_peer *client)
 	DrdynvcServerContext *vc_ctx;
 
 	assert_compositor_thread(peer_ctx->rdpBackend);
+
+#if FREERDP_VERSION_MAJOR >= 3
+	/*
+	 * FreeRDP 3: the virtual channel manager drives drdynvc itself.
+	 * Starting the separate drdynvc server addin as well lets that addin's
+	 * thread swallow the client's CAPS response, and the manager never
+	 * reaches DRDYNVC_STATE_READY. Just make sure the CAPS request went out;
+	 * the caller waits for READY asynchronously (rdp_client_activity()).
+	 */
+	(void)vc_ctx;
+	client->activated = TRUE;
+	return WTSVirtualChannelManagerOpen(peer_ctx->vcm) ? true : false;
+#endif
 
 	/* Open Dynamic virtual channel */
 	vc_ctx = drdynvc_server_context_new(peer_ctx->vcm);
@@ -5033,6 +5363,15 @@ rdp_rail_backend_create(struct rdp_backend *b, struct weston_rdp_backend_config 
 void
 rdp_rail_destroy(struct rdp_backend *b)
 {
+	struct rdp_exec_client *exec_client, *tmp;
+
+	/* the programs keep running, the compositor is going away */
+	wl_list_for_each_safe(exec_client, tmp, &b->exec_clients, link) {
+		wl_list_remove(&exec_client->destroy_listener.link);
+		wl_list_remove(&exec_client->link);
+		free(exec_client);
+	}
+
 	if (b->create_window_listener.notify) {
 		wl_list_remove(&b->create_window_listener.link);
 		b->create_window_listener.notify = NULL;

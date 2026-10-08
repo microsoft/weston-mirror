@@ -235,3 +235,16 @@ option(
 	value: false,
 	description: 'Generate documentation'
 )
+
+option(
+	'cups-serverbin',
+	type: 'string',
+	value: '/usr/lib/cups',
+	description: 'RDP printing: CUPS server binary directory (backend, filter)'
+)
+option(
+	'cups-datadir',
+	type: 'string',
+	value: '/usr/share/cups',
+	description: 'RDP printing: CUPS data directory (MIME types)'
+)

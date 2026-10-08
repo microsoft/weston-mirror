@@ -214,6 +214,8 @@ if get_option('backend-rdp')
 			'rdpclip.c',
 			'rdprail.c',
 			'rdputil.c',
+			'rdpdrive.c',
+			'rdpdr/rdpdr_server.c',
 		),
 	]]
 endif
