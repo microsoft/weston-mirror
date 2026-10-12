@@ -246,6 +246,7 @@ struct rdp_peer_context {
 #endif // HAVE_FREERDP_GFXREDIR_H
 	uint32_t currentFrameId;
 	uint32_t acknowledgedFrameId;
+	bool repaint_deferred;
 	bool isAcknowledgedSuspended;
 	struct wl_client *clientExec;
 	struct wl_listener clientExec_destroy_listener;

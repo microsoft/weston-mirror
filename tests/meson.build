@@ -216,6 +216,13 @@ if get_option('backend-rdp')
 			'rdputil.c',
 		),
 	]]
+	tests_standalone += [[
+		'rdp-repaint',
+		[],
+		deps_rdp + [dep_zucmain],
+		plugin_rdp.extract_objects('hash.c', 'rdp.c', 'rdpdisp.c',
+			'rdpclip.c', 'rdputil.c'),
+	]]
 endif
 
 if get_option('xwayland')
