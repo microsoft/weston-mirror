@@ -43,6 +43,7 @@
 #include <strings.h>
 
 #include "rdp.h"
+#include "rdp-planar.h"
 
 #include "libweston-internal.h"
 #include "shared/xalloc.h"
@@ -2805,6 +2806,9 @@ rdp_rail_update_window(struct weston_surface *surface,
 				int damageStride = damage_width * bufferBpp;
 				int damageSize = damageStride * damage_height;
 				BYTE *data = NULL;
+				BYTE *encoded = NULL;
+				UINT32 encoded_size = 0;
+				const char *compression;
 				int alphaCodecHeaderSize = 4;
 				BYTE *alpha = NULL;
 				int alphaSize;
@@ -2917,11 +2921,22 @@ rdp_rail_update_window(struct weston_surface *surface,
 				surfaceCommand.codecId = RDPGFX_CODECID_UNCOMPRESSED;
 				surfaceCommand.length = damageSize;
 				surfaceCommand.data = &data[0];
+				compression = getenv("WESTON_RDP_PLANAR_COMPRESSION");
+				if (!b->force_no_compression &&
+				    (!compression || strcmp(compression, "false") != 0) &&
+				    rdp_planar_compress(data, damage_width, damage_height,
+							damageStride, &encoded,
+							&encoded_size)) {
+					surfaceCommand.codecId = RDPGFX_CODECID_PLANAR;
+					surfaceCommand.length = encoded_size;
+					surfaceCommand.data = encoded;
+				}
 				rdp_debug_verbose(b, "SurfaceCommand(frameId:0x%x, windowId:0x%x) for bitmap\n",
 						  iter_data->startedFrameId,
 						  window_id);
 				gfx_ctx->SurfaceCommand(gfx_ctx, &surfaceCommand);
 
+				free(encoded);
 				free(data);
 				free(alpha);
 			}

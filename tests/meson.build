@@ -213,8 +213,14 @@ if get_option('backend-rdp')
 			'rdpdisp.c',
 			'rdpclip.c',
 			'rdprail.c',
+			'rdp-planar.c',
 			'rdputil.c',
 		),
+	]]
+	tests_standalone += [[
+		'rdp-planar',
+		['../libweston/backend-rdp/rdp-planar.c'],
+		[dep_frdp, dep_zucmain],
 	]]
 endif
 

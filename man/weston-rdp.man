@@ -87,6 +87,16 @@ $ openssl x509 -req -days 365 -signkey tls.key -in tls.csr -out tls.crt
 You will get the tls.key and tls.crt files to use with the RDP backend.
 .
 .\" ***************************************************************
+.SH "ENVIRONMENT"
+.TP
+.B WESTON_RDP_PLANAR_COMPRESSION
+In standalone RAIL mode, bitmap updates use lossless planar RLE compression
+when it produces fewer bytes than the original bitmap. Colour precision and
+alpha are retained. Set this variable to
+.B false
+to send raw bitmaps instead. This affects the network RDPGFX path only;
+shared-memory graphics redirection is unchanged.
+.
 .SH "SEE ALSO"
 .BR weston (1)
 .\".BR weston.ini (5)
