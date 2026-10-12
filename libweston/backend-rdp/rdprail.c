@@ -86,6 +86,7 @@ struct rdp_rail_dispatch_data {
 		RAIL_SNAP_ARRANGE snap_arrange;
 		RAIL_GET_APPID_REQ_ORDER get_appid_req;
 		RAIL_LANGUAGEIME_INFO_ORDER language_ime_info;
+		RDPGFX_FRAME_ACKNOWLEDGE_PDU frame_ack;
 #ifdef HAVE_FREERDP_RDPAPPLIST_H
 		RDPAPPLIST_CLIENT_CAPS_PDU app_list_caps;
 #endif /* HAVE_FREERDP_RDPAPPLIST_H */
@@ -1190,17 +1191,39 @@ rail_grfx_client_cache_import_offer(RdpgfxServerContext *context,
 	return CHANNEL_RC_OK;
 }
 
-static UINT
-rail_grfx_client_frame_acknowledge(RdpgfxServerContext *context,
-				   const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge)
+static void
+rail_grfx_frame_acknowledge_callback(bool freeOnly, void *arg)
 {
-	freerdp_peer *client = context->custom;
+	struct rdp_rail_dispatch_data *data = wl_container_of(arg, data, task_base);
+	freerdp_peer *client = data->client;
 	RdpPeerContext *peer_ctx = (RdpPeerContext *)client->context;
 	struct rdp_backend *b = peer_ctx->rdpBackend;
+	const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge = &data->frame_ack;
+
+	assert_compositor_thread(b);
+	if (freeOnly)
+		goto out;
 	rdp_debug_verbose(b, "Client: GrfxFrameAcknowledge(queueDepth = 0x%x, frameId = 0x%x, decodedFrame = %d)\n",
 			  frameAcknowledge->queueDepth, frameAcknowledge->frameId, frameAcknowledge->totalFramesDecoded);
 	peer_ctx->acknowledgedFrameId = frameAcknowledge->frameId;
 	peer_ctx->isAcknowledgedSuspended = (frameAcknowledge->queueDepth == 0xffffffff);
+	if (peer_ctx->repaint_deferred &&
+	    (peer_ctx->isAcknowledgedSuspended ||
+	     peer_ctx->currentFrameId - peer_ctx->acknowledgedFrameId < 2)) {
+		peer_ctx->repaint_deferred = false;
+		rdp_debug_verbose(b, "Resuming deferred RAIL repaint after frame acknowledgement\n");
+		weston_compositor_damage_all(b->compositor);
+	}
+out:
+	free(data);
+}
+
+static UINT
+rail_grfx_client_frame_acknowledge(RdpgfxServerContext *context,
+				   const RDPGFX_FRAME_ACKNOWLEDGE_PDU *frameAcknowledge)
+{
+	RDP_DISPATCH_TO_DISPLAY_LOOP(context, frame_ack, frameAcknowledge,
+				     rail_grfx_frame_acknowledge_callback);
 	return CHANNEL_RC_OK;
 }
 
@@ -3196,6 +3219,7 @@ rdp_rail_output_repaint(struct weston_output *output,
 			weston_compositor_wake(b->compositor);
 		}
 	} else {
+		peer_ctx->repaint_deferred = true;
 		rdp_debug_verbose(b, "frame update is skipped. currentFrameId:%d, acknowledgedFrameId:%d, isAcknowledgedSuspended:%d\n",
 				  peer_ctx->currentFrameId,
 				  peer_ctx->acknowledgedFrameId,
