@@ -286,6 +286,48 @@ create_surface(struct weston_desktop_xwayland *xwayland,
 }
 
 static void
+unmap(struct weston_desktop_xwayland_surface *surface)
+{
+	struct weston_surface *wsurface =
+		weston_desktop_surface_get_surface(surface->surface);
+
+	/* Called when the X11 window is unmapped, rather than when the
+	 * wl_surface is destroyed. Xwayland >= 22.1 defers wl_surface
+	 * destruction by one second (DELAYED_WL_SURFACE_DESTROY) unless the
+	 * compositor supports xwayland-shell-v1, so waiting for the resource
+	 * to go away would keep the window on screen long after the client
+	 * withdrew it.
+	 *
+	 * The surface is left allocated and is freed as usual from
+	 * weston_desktop_xwayland_surface_destroy(); resetting the state here
+	 * makes that a no-op. The X window manager creates a fresh shell
+	 * surface if the window is mapped again, so this one is never reused.
+	 *
+	 * Unmap the weston_surface first: weston_view_unmap() only drops seat
+	 * focus once the surface is no longer mapped, so tearing the views
+	 * down before this would leave the withdrawn window holding keyboard
+	 * focus until the wl_surface finally goes away.
+	 */
+	weston_surface_unmap(wsurface);
+
+	weston_desktop_surface_unset_relative_to(surface->surface);
+
+	if (surface->added) {
+		weston_desktop_api_surface_removed(surface->desktop,
+						   surface->surface);
+		surface->added = false;
+	} else if (surface->state == XWAYLAND) {
+		weston_desktop_surface_unlink_view(surface->view);
+		weston_view_destroy(surface->view);
+		surface->view = NULL;
+	}
+
+	surface->state = NONE;
+	surface->prev_state = NONE;
+	surface->committed = false;
+}
+
+static void
 set_toplevel(struct weston_desktop_xwayland_surface *surface)
 {
 	weston_desktop_xwayland_surface_change_state(surface, TOPLEVEL, NULL,
@@ -461,6 +503,7 @@ get_position(struct weston_desktop_xwayland_surface *surface,
 
 static const struct weston_desktop_xwayland_interface weston_desktop_xwayland_interface = {
 	.create_surface = create_surface,
+	.unmap = unmap,
 	.set_toplevel = set_toplevel,
 	.set_toplevel_with_position = set_toplevel_with_position,
 	.set_parent = set_parent,

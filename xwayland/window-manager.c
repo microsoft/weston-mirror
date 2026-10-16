@@ -1438,6 +1438,8 @@ weston_wm_handle_unmap_notify(struct weston_wm *wm, xcb_generic_event_t *event)
 {
 	xcb_unmap_notify_event_t *unmap_notify =
 		(xcb_unmap_notify_event_t *) event;
+	const struct weston_desktop_xwayland_interface *xwayland_interface =
+		wm->server->compositor->xwayland_interface;
 	struct weston_wm_window *window;
 
 	wm_printf(wm, "XCB_UNMAP_NOTIFY (window %d, event %d%s)\n",
@@ -1468,6 +1470,13 @@ weston_wm_handle_unmap_notify(struct weston_wm *wm, xcb_generic_event_t *event)
 		wm->focus_window = NULL;
 	if (window->surface)
 		wl_list_remove(&window->surface_destroy_listener.link);
+	/* Drop the shell surface now instead of waiting for the wl_surface to
+	 * be destroyed: Xwayland may hold the surface alive for up to a second
+	 * after the window is gone, which would leave it visible to the shell
+	 * (and, for rdprail, to the RDP client) for that long.
+	 */
+	if (window->shsurf && xwayland_interface && xwayland_interface->unmap)
+		xwayland_interface->unmap(window->shsurf);
 	window->surface = NULL;
 	window->shsurf = NULL;
 

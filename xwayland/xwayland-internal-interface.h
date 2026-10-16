@@ -37,6 +37,9 @@ struct weston_desktop_xwayland_interface {
 	struct weston_desktop_xwayland_surface *(*create_surface)(struct weston_desktop_xwayland *xwayland,
 						      struct weston_surface *surface,
 						      const struct weston_xwayland_client_interface *client);
+	/* Tear the window down without waiting for the wl_surface to be
+	 * destroyed. Optional: callers must check for NULL. */
+	void (*unmap)(struct weston_desktop_xwayland_surface *shsurf);
 	void (*set_toplevel)(struct weston_desktop_xwayland_surface *shsurf);
 	void (*set_toplevel_with_position)(struct weston_desktop_xwayland_surface *shsurf,
 					   int32_t x, int32_t y);

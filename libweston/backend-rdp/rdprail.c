@@ -2993,6 +2993,104 @@ rdp_rail_update_window(struct weston_surface *surface,
 	return 0;
 }
 
+/* Hide the window of a surface that has been unmapped but not yet destroyed.
+ *
+ * The window is only deleted when the weston_surface is destroyed, which a
+ * client may defer: Xwayland >= 22.1 keeps the wl_surface of an unmapped X11
+ * window alive for a second unless the compositor supports xwayland-shell-v1.
+ * Once unmapped the surface has no output, so rdp_rail_update_window() (which
+ * requires one) is never called for it again, and the window would stay
+ * visible on the client until the surface is finally destroyed.
+ *
+ * Clearing rail_state->output and forcing a state update makes
+ * rdp_rail_update_window() show the window and restore its taskbar button if
+ * the surface is mapped again.
+ */
+static void
+rdp_rail_sync_window_zorder(struct weston_compositor *compositor);
+
+static void
+rdp_rail_hide_unmapped_window(struct weston_surface *surface)
+{
+	struct rdp_backend *b = to_rdp_backend(surface->compositor);
+	RdpPeerContext *peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
+	struct weston_surface_rail_state *rail_state = surface->backend_state;
+	WINDOW_ORDER_INFO window_order_info = {};
+	WINDOW_STATE_ORDER window_state_order = {};
+	rdpUpdate *update = b->rdp_peer->context->update;
+
+	/* If the window being hidden is the active one, the client activates
+	 * whichever window is next in its own z-order, which may belong to a
+	 * different application. Send the z-order first: the unmapped window
+	 * is no longer in it, so the client activates the window now on top
+	 * (normally the one the shell just gave keyboard focus to) instead.
+	 * rdp_rail_destroy_window() likewise marks the z-order dirty.
+	 */
+	rdp_rail_sync_window_zorder(surface->compositor);
+	peer_ctx->is_window_zorder_dirty = false;
+
+	window_order_info.windowId = rail_state->window_id;
+	window_order_info.fieldFlags = WINDOW_ORDER_TYPE_WINDOW |
+				       WINDOW_ORDER_FIELD_SHOW |
+				       WINDOW_ORDER_FIELD_TASKBAR_BUTTON;
+	window_state_order.showState = WINDOW_HIDE;
+	window_state_order.TaskbarButton = 1;
+
+	rdp_debug_verbose(b, "WindowUpdate(0x%x - hide unmapped window)\n",
+			  rail_state->window_id);
+	update->BeginPaint(update->context);
+	update->window->WindowUpdate(update->context, &window_order_info,
+				     &window_state_order);
+	update->EndPaint(update->context);
+
+	rail_state->output = NULL;
+	rail_state->forceUpdateWindowState = true;
+	rail_state->showState = RDP_WINDOW_HIDE;
+	rail_state->taskbarButton = window_state_order.TaskbarButton;
+}
+
+/* A surface can be visible without being flagged as mapped itself:
+ * libweston-desktop maps the views of transient children (such as X11
+ * tooltips and hover popups) without setting is_mapped on their surface.
+ * Only treat a surface as unmapped if none of its views is mapped either.
+ */
+static bool
+rdp_rail_surface_is_unmapped(struct weston_surface *surface)
+{
+	struct weston_view *view;
+
+	if (weston_surface_is_mapped(surface))
+		return false;
+
+	wl_list_for_each(view, &surface->views, surface_link) {
+		if (weston_view_is_mapped(view))
+			return false;
+	}
+
+	return true;
+}
+
+static void
+rdp_rail_hide_unmapped_window_iter(void *element, void *data)
+{
+	struct weston_surface *surface = element;
+	struct weston_surface_rail_state *rail_state = surface->backend_state;
+
+	assert(rail_state);
+
+	/* rail_state->output is only set once the window has been shown, and
+	 * is cleared again when it is hidden. A minimized surface stays
+	 * mapped, so it is left alone here.
+	 */
+	if (!rail_state->isCursor &&
+	    !rail_state->error &&
+	    rail_state->window_id &&
+	    rail_state->isWindowCreated &&
+	    rail_state->output &&
+	    rdp_rail_surface_is_unmapped(surface))
+		rdp_rail_hide_unmapped_window(surface);
+}
+
 static void
 rdp_rail_update_window_iter(void *element, void *data)
 {
@@ -3158,6 +3256,14 @@ rdp_rail_output_repaint(struct weston_output *output,
 	struct weston_compositor *ec = output->compositor;
 	struct rdp_backend *b = to_rdp_backend(ec);
 	RdpPeerContext *peer_ctx = (RdpPeerContext *)b->rdp_peer->context;
+
+	/* Hiding a window only sends a window order, not a graphics frame, so
+	 * do it regardless of frame acknowledgement. Otherwise a hide skipped
+	 * here would not be retried until something else schedules a repaint.
+	 */
+	rdp_id_manager_for_each(&peer_ctx->windowId,
+				rdp_rail_hide_unmapped_window_iter,
+				NULL);
 
 	if (peer_ctx->isAcknowledgedSuspended ||
 	    ((peer_ctx->currentFrameId - peer_ctx->acknowledgedFrameId) < 2)) {

@@ -959,6 +959,25 @@ focus_state_surface_destroy(struct wl_listener *listener, void *data)
 	}
 }
 
+/* Move keyboard focus away from a surface that has been unmapped but not yet
+ * destroyed, as focus_state_surface_destroy() would do when it is destroyed.
+ * Xwayland can keep the wl_surface of a withdrawn X11 window alive for a
+ * second, and without this nothing would hold keyboard focus meanwhile.
+ */
+static void
+focus_state_surface_unmapped(struct desktop_shell *shell,
+			     struct weston_surface *surface)
+{
+	struct workspace *ws = get_current_workspace(shell);
+	struct focus_state *state, *tmp;
+
+	wl_list_for_each_safe(state, tmp, &ws->focus_list, link) {
+		if (state->keyboard_focus == surface)
+			focus_state_surface_destroy(&state->surface_destroy_listener,
+						    surface);
+	}
+}
+
 static struct focus_state *
 focus_state_create(struct desktop_shell *shell, struct weston_seat *seat,
 		   struct workspace *ws)
@@ -2481,6 +2500,9 @@ desktop_surface_removed(struct weston_desktop_surface *desktop_surface,
 		wl_list_init(&shsurf_child->children_link);
 	}
 	wl_list_remove(&shsurf->children_link);
+
+	if (!weston_surface_is_mapped(surface))
+		focus_state_surface_unmapped(shell, surface);
 
 	wl_signal_emit(&shsurf->destroy_signal, shsurf);
 
