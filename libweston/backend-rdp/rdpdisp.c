@@ -142,6 +142,16 @@ update_head(struct rdp_backend *rdp, struct rdp_head *head, rdpMonitor *config)
 	if (changed) {
 		weston_head_set_device_changed(&head->base);
 	}
+
+	/* Update physical monitor dimensions received from RDP. */
+	if (config->attributes.physicalWidth > 0 &&
+	    config->attributes.physicalHeight > 0) {
+		weston_head_set_physical_size(
+			&head->base,
+			config->attributes.physicalWidth,
+			config->attributes.physicalHeight);
+	}
+
 	head->config = *config;
 }
 
