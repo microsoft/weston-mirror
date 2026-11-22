@@ -263,6 +263,12 @@ struct weston_surface_rail_state {
 
 	/* rdpgfx surface */
 	uint32_t surface_id;
+
+	/* Listens on parent_surface's destroy signal so parent_surface is
+	   cleared instead of left dangling. Kept at the end of the struct so
+	   the layout of the fields above (also used by rdprail-shell) is
+	   unchanged. */
+	struct wl_listener parent_destroy_listener;
 };
 
 #define WESTON_RDP_BACKEND_CONFIG_VERSION 3

@@ -57,6 +57,65 @@ extern PWtsApiFunctionTable FreeRDP_InitWtsApi(void);
 
 static void rdp_rail_destroy_window(struct wl_listener *listener, void *data);
 static void rdp_rail_schedule_update_window(struct wl_listener *listener, void *data);
+
+/* A subsurface's RAIL window keeps a pointer to its main (parent) surface
+   for the RAIL owner window id. In Wayland a subsurface can outlive its
+   parent (it just becomes inert), so the pointer must be cleared when the
+   parent goes away; otherwise rdp_rail_update_window() reads through a
+   freed weston_surface (microsoft/wslg#1459). */
+static void
+rdp_rail_parent_destroy(struct wl_listener *listener, void *data)
+{
+	struct weston_surface_rail_state *rail_state =
+		container_of(listener, struct weston_surface_rail_state,
+			     parent_destroy_listener);
+	struct weston_surface *parent = data;
+	struct rdp_backend *b = to_rdp_backend(parent->compositor);
+
+	assert(parent == rail_state->parent_surface);
+
+	rdp_debug(b, "%s: parent of windowId:0x%x destroyed, clearing parent_surface\n",
+		  __func__, rail_state->window_id);
+
+	wl_list_remove(&rail_state->parent_destroy_listener.link);
+	rail_state->parent_destroy_listener.notify = NULL;
+	rail_state->parent_surface = NULL;
+}
+
+static void
+rdp_rail_set_parent_surface(struct weston_surface_rail_state *rail_state,
+			    struct weston_surface *parent)
+{
+	if (rail_state->parent_surface == parent)
+		return;
+
+	if (rail_state->parent_destroy_listener.notify) {
+		wl_list_remove(&rail_state->parent_destroy_listener.link);
+		rail_state->parent_destroy_listener.notify = NULL;
+	}
+
+	rail_state->parent_surface = parent;
+
+	if (parent) {
+		rail_state->parent_destroy_listener.notify = rdp_rail_parent_destroy;
+		wl_signal_add(&parent->destroy_signal,
+			      &rail_state->parent_destroy_listener);
+	}
+}
+
+/* Main surface of a subsurface, or NULL if it has none. Once the parent is
+   gone (or the wl_subsurface object itself is destroyed while the
+   wl_surface lives on), weston_surface_get_main_surface() returns NULL or
+   the surface itself; a surface must never become its own parent. */
+static struct weston_surface *
+rdp_rail_get_parent_surface(struct weston_surface *surface)
+{
+	struct weston_surface *main_surface =
+		weston_surface_get_main_surface(surface);
+
+	return main_surface == surface ? NULL : main_surface;
+}
+
 static void rdp_rail_dump_window_label(struct weston_surface *surface, char *label, uint32_t label_size);
 
 struct lang_GUID {
@@ -1572,8 +1631,8 @@ rdp_rail_create_window(struct wl_listener *listener, void *data)
 
 	if (surface->role_name != NULL) {
 		if (strcmp(surface->role_name, "wl_subsurface") == 0) {
-			rail_state->parent_surface = weston_surface_get_main_surface(surface);
-			assert(surface != rail_state->parent_surface);
+			rdp_rail_set_parent_surface(rail_state,
+						    rdp_rail_get_parent_surface(surface));
 		} else if (strcmp(surface->role_name, "wl_pointer-cursor") == 0) {
 			rail_state->isCursor = true;
 		}
@@ -1920,6 +1979,7 @@ rdp_rail_destroy_window(struct wl_listener *listener, void *data)
 	}
 
 Exit:
+	rdp_rail_set_parent_surface(rail_state, NULL);
 	free(rail_state);
 	surface->backend_state = NULL;
 
@@ -2028,8 +2088,8 @@ rdp_rail_update_window(struct weston_surface *surface,
 	if (surface->role_name != NULL) {
 		if (!rail_state->parent_surface) {
 			if (strcmp(surface->role_name, "wl_subsurface") == 0) {
-				rail_state->parent_surface = weston_surface_get_main_surface(surface);
-				assert(surface != rail_state->parent_surface);
+				rdp_rail_set_parent_surface(rail_state,
+							    rdp_rail_get_parent_surface(surface));
 			}
 		}
 		if (!rail_state->isCursor) {
